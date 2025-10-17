@@ -1,0 +1,14 @@
+tmp
+__pycache__
+.DS_Store
+.ipynb_checkpoints
+*.pyc
+.env
+.venv
+*.ipynb
+tmp/*
+checkpoints/*
+.vscode/*
+pyrightconfig.json
+lightning_logs/*
+logs/*
