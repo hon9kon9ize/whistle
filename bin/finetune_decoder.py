@@ -11,7 +11,6 @@ Usage:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import lightning.pytorch as pl
 from lightning.pytorch import Trainer
@@ -19,16 +18,15 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 import argparse
 import os
-from transformers import AutoTokenizer, WhisperProcessor, WhisperModel
+from transformers import WhisperProcessor, WhisperModel
 from datasets import load_dataset
 
 from whistle.tle.tle import TLEVAE, TLEVAEConfig
-from whistle.tle.data import create_preprocessed_data_loader
 
 
 def load_whisper_model(
     device: str = "cuda",
-) -> tuple[WhisperModel, WhisperProcessor, AutoTokenizer]:
+) -> tuple[WhisperModel, WhisperProcessor]:
     """Load Whisper model components."""
     if not torch.cuda.is_available() and device == "cuda":
         device = "cpu"
@@ -38,9 +36,8 @@ def load_whisper_model(
     whisper_model = whisper_model.to(device)
 
     processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-    tokenizer = AutoTokenizer.from_pretrained("openai/whisper-large-v3")
 
-    return whisper_model, processor, tokenizer
+    return whisper_model, processor
 
 
 def load_tle_model(checkpoint_path: str, device: str = "cuda") -> TLEVAE:
@@ -72,7 +69,6 @@ class WhisperDecoderFinetune(pl.LightningModule):
         tle_model: TLEVAE,
         whisper_model: WhisperModel,
         processor: WhisperProcessor,
-        tokenizer: AutoTokenizer,
         learning_rate: float = 1e-5,
         label_smoothing: float = 0.1,
     ):
@@ -80,7 +76,6 @@ class WhisperDecoderFinetune(pl.LightningModule):
         self.tle_model = tle_model
         self.whisper = whisper_model
         self.processor = processor
-        self.tokenizer = tokenizer
         self.learning_rate = learning_rate
         self.label_smoothing = label_smoothing
 
@@ -97,9 +92,8 @@ class WhisperDecoderFinetune(pl.LightningModule):
 
     def forward(self, input_ids, attention_mask, lang_ids=None):
         """
-        Generate pseudo encoder states from text using TLE, then decode.
+        Generate pseudo encoder states from text using TLE.
         """
-        device = input_ids.device
         batch_size, seq_len = input_ids.shape
 
         # Generate pseudo encoder states using TLE
@@ -111,17 +105,6 @@ class WhisperDecoderFinetune(pl.LightningModule):
                 input_ids, attention_mask, target_T=target_T, lang_ids=lang_ids
             )
 
-        # Use Whisper decoder with pseudo encoder states
-        # Create decoder input (start with <|startoftranscript|>)
-        decoder_start_token_id = self.tokenizer.convert_tokens_to_ids(
-            "<|startoftranscript|>"
-        )
-        decoder_input_ids = torch.full(
-            (batch_size, 1), decoder_start_token_id, dtype=torch.long, device=device
-        )
-
-        # For training, we'll use teacher forcing with the target text
-        # This is a simplified version - in practice you'd want proper seq2seq training
         return E_pseudo
 
     def training_step(self, batch, batch_idx):
@@ -129,9 +112,6 @@ class WhisperDecoderFinetune(pl.LightningModule):
         attention_mask = batch["attention_mask"]
         labels = batch["labels"]  # Full target sequence for decoder
         lang_ids = batch.get("lang_ids")
-
-        device = input_ids.device
-        batch_size = input_ids.size(0)
 
         # Get pseudo encoder states from TLE using raw text
         with torch.no_grad():
@@ -176,9 +156,6 @@ class WhisperDecoderFinetune(pl.LightningModule):
         labels = batch["labels"]
         lang_ids = batch.get("lang_ids")
 
-        device = input_ids.device
-        batch_size = input_ids.size(0)
-
         # Get pseudo encoder states
         with torch.no_grad():
             target_T = max(50, input_ids.size(1) * 3)
@@ -219,15 +196,12 @@ class TextOnlyDataset(torch.utils.data.Dataset):
     Generates target labels for decoder training.
     """
 
-    def __init__(
-        self, hf_dataset, tokenizer, processor=None, split="train", max_length=256
-    ):
+    def __init__(self, hf_dataset, processor, split="train", max_length=256):
         # Handle different dataset types: HF datasets vs mock datasets
         if split is not None and hasattr(hf_dataset, "keys") and split in hf_dataset:
             self.dataset = hf_dataset[split]
         else:
             self.dataset = hf_dataset
-        self.tokenizer = tokenizer
         self.processor = processor
         self.max_length = max_length
 
@@ -242,7 +216,7 @@ class TextOnlyDataset(torch.utils.data.Dataset):
         lang = item.get("language", "en")
 
         # Tokenize raw text for TLE input (without special tokens)
-        tle_tokens = self.tokenizer(
+        tle_tokens = self.processor.tokenizer(
             text,
             return_tensors="pt",
             max_length=self.max_length,
@@ -251,37 +225,15 @@ class TextOnlyDataset(torch.utils.data.Dataset):
         )
 
         # Create full target sequence for decoder using proper tokenization
-        if self.processor is not None:
-            # Use processor tokenizer with proper prefix tokens
-            self.processor.tokenizer.set_prefix_tokens(language=lang, task="transcribe")
-            target_tokens = self.processor.tokenizer(
-                text,
-                return_tensors="pt",
-                max_length=self.max_length,
-                truncation=True,
-                padding=False,
-            )
-        else:
-            # Fallback to manual composition (current behavior)
-            # Add language-specific prefix for Whisper
-            if lang == "zh":
-                prefix = "<|zh|>"
-            elif lang == "yue":
-                prefix = "<|yue|>"
-            else:
-                prefix = "<|en|>"
-
-            # Create full target sequence for decoder
-            target_text = f"{prefix}<|startoftranscript|>{text}<|endoftext|>"
-
-            # Tokenize target sequence for decoder
-            target_tokens = self.tokenizer(
-                target_text,
-                return_tensors="pt",
-                max_length=self.max_length,
-                truncation=True,
-                padding=False,
-            )
+        # Use processor tokenizer with proper prefix tokens
+        self.processor.tokenizer.set_prefix_tokens(language=lang, task="transcribe")
+        target_tokens = self.processor.tokenizer(
+            text,
+            return_tensors="pt",
+            max_length=self.max_length,
+            truncation=True,
+            padding=False,
+        )
 
         return {
             "input_ids": tle_tokens["input_ids"].squeeze(),  # Raw text for TLE
@@ -295,8 +247,8 @@ class TextOnlyDataset(torch.utils.data.Dataset):
 class TextOnlyCollator:
     """Collator for text-only fine-tuning batches."""
 
-    def __init__(self, tokenizer, max_length=256, language_mapping=None):
-        self.tokenizer = tokenizer
+    def __init__(self, processor, max_length=256, language_mapping=None):
+        self.processor = processor
         self.max_length = max_length
         self.language_mapping = language_mapping or {"en": 0, "zh": 1, "yue": 2}
 
@@ -314,7 +266,9 @@ class TextOnlyCollator:
 
         # Pad sequences
         input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+            input_ids,
+            batch_first=True,
+            padding_value=self.processor.tokenizer.pad_token_id,
         )
         attention_masks = torch.nn.utils.rnn.pad_sequence(
             attention_masks, batch_first=True, padding_value=0
@@ -389,7 +343,7 @@ def main():
     print(f"Using device: {device}")
 
     # Load models
-    whisper_model, processor, tokenizer = load_whisper_model(device)
+    whisper_model, processor = load_whisper_model(device)
     tle_model = load_tle_model(args.tle_checkpoint, device)
 
     # Load dataset
@@ -401,13 +355,11 @@ def main():
         return
 
     # Create datasets
-    train_dataset = TextOnlyDataset(
-        dataset, tokenizer, processor, split=args.train_split
-    )
-    val_dataset = TextOnlyDataset(dataset, tokenizer, processor, split=args.val_split)
+    train_dataset = TextOnlyDataset(dataset, processor, split=args.train_split)
+    val_dataset = TextOnlyDataset(dataset, processor, split=args.val_split)
 
     # Create collator
-    collator = TextOnlyCollator(tokenizer)
+    collator = TextOnlyCollator(processor)
 
     # Create data loaders
     train_loader = DataLoader(
@@ -429,7 +381,7 @@ def main():
 
     # Create model
     model = WhisperDecoderFinetune(
-        tle_model, whisper_model, processor, tokenizer, learning_rate=args.learning_rate
+        tle_model, whisper_model, processor, learning_rate=args.learning_rate
     )
 
     # Callbacks
