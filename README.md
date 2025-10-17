@@ -1,6 +1,6 @@
 # 🗣️ Whisper-TLE: Text-to-Latent VAE for Text-Only Fine-Tuning of Whisper
 
-> **Text-to-Latent Encoder (TLE)** — a multilingual VAE that learns to map text tokens to pseudo audio encoder states for OpenAI’s `whisper-large-v3`.  
+> **Text-to-Latent Encoder (TLE)** — a VAE that learns to map text tokens to pseudo audio encoder states for OpenAI’s `whisper-large-v3`.  
 > Enables text-only adaptation and domain tuning *without* paired speech data.
 
 ---
@@ -21,9 +21,6 @@ The goal is to fine-tune Whisper (or any seq2seq ASR model) on *text-only* data 
 
 - 🧠 **VAE formulation**  
   Global latent `z ~ N(μ, σ²)` with residual Conv1D FiLM modulation and β-VAE training objective.
-
-- 🌍 **Multilingual support**  
-  Optional language embeddings and temperature-balanced sampling for multilingual fine-tuning.
 
 - 🗣️ **Two-phase workflow**
   1. **Supervised TLE training**: regress text → teacher encoder states from paired speech–text.  
@@ -121,7 +118,7 @@ loss.backward()
 
 ---
 
-## � Training
+## 🏃 Training
 
 ### Command-Line Training
 
@@ -162,17 +159,34 @@ The script automatically loads Whisper models, creates the TLE configuration, an
 
 ---
 
-## �🌍 Multilingual Training
+## 🎯 Fine-Tuning Whisper with TLE
 
-To build a multilingual TLE:
+After training the TLE model, you can fine-tune the Whisper decoder using text-only data by replacing the speech encoder with TLE-generated pseudo encoder states.
 
-* Add a `lang_embed = nn.Embedding(num_langs, text_hidden)` and sum it into the token embeddings.
-* Use **temperature-based sampling** to balance language proportions:
-  [
-  p_l \propto n_l^\alpha, \ \alpha < 1
-  ]
-* Include typologically diverse languages (different families & scripts).
-* Optionally train with TTS-generated audio for low-resource languages.
+### Phase 2: Text-Only Decoder Fine-Tuning
+
+```bash
+# Planned: Fine-tune Whisper decoder with TLE (coming soon)
+# python bin/finetune_decoder.py \
+#   --tle-checkpoint "checkpoints/tle-epoch=XX-step=XXXXX.ckpt" \
+#   --dataset "path/to/text/dataset" \
+#   --language "en" \
+#   --max-steps 50000
+```
+
+### How It Works
+
+1. **Load trained TLE model** and freeze its weights
+2. **Load Whisper model** and freeze the encoder
+3. **Generate pseudo encoder states** from text using TLE
+4. **Fine-tune only the decoder** on text-to-text translation task
+5. **Result**: Domain-adapted Whisper decoder that works with text-only data
+
+### Benefits
+
+- **Text-only adaptation**: No need for paired audio-text data after TLE training
+- **Domain specialization**: Adapt Whisper to specific domains (medical, legal, technical)
+- **Reduced computational cost**: Only train decoder parameters (~300M vs 1.5B total)
 
 ---
 
@@ -182,7 +196,6 @@ To build a multilingual TLE:
 | ----- | ----------------- | ------------- | ----- | ------------------------------------- |
 | 1     | Paired audio–text | `MSE + β·KL`  | 100k  | Freeze Whisper; train TLE             |
 | 2     | Text-only         | `Decoder NLL` | 50k   | Alternate text-only & audio steps     |
-| 3     | Optional          | Joint TLE+TTS | 30k   | Combine both latent & TTS supervision |
 
 ---
 
@@ -193,11 +206,38 @@ After training, you can evaluate WER or CER on out-of-domain test sets by:
 1. Using the frozen Whisper encoder (for audio evaluation), or
 2. Using TLE-generated encoder states from text (for domain adaptation).
 
-The paper reports that **TLE+TTS** outperforms either approach alone across multiple languages.
+The paper reports that TLE provides effective domain adaptation for speech recognition transformers.
 
 ---
 
-## 📁 Repository Structure
+## � Roadmap
+
+### ✅ Implemented Features
+
+- **TLE Training Pipeline**: Complete training script for TLE on paired audio-text data
+- **Dataset Compatibility**: Support for Common Voice and custom preprocessed datasets
+- **Audio Augmentation**: 8kHz resampling + μ-law compression for training
+- **Model Architecture**: Full TLE-VAE implementation with FiLM modulation
+
+### 🚧 Planned Features
+
+- **Text-Only Fine-Tuning**: `finetune_decoder.py` script for Phase 2 decoder adaptation
+- **Advanced Data Loading**: `tle/utils.py` with enhanced data utilities
+- **Evaluation Suite**: Automated WER/CER evaluation scripts
+- **Model Zoo**: Pre-trained TLE checkpoints
+
+### 🎯 Current Status
+
+| Component | Status | Priority |
+|-----------|--------|----------|
+| TLE Training | ✅ Complete | - |
+| Dataset Loading | ✅ Complete | - |
+| Text-Only Fine-Tuning | ❌ Not implemented | High |
+| Evaluation Tools | ❌ Not implemented | Low |
+
+---
+
+## �📁 Repository Structure
 
 ```
 whistle/
@@ -210,7 +250,7 @@ whistle/
 
 **Planned additions:**
 - `tle/utils.py` - data loading utilities and helper functions
-- `tle/data.py` - dataset classes and multilingual sampling  
+- `tle/data.py` - dataset classes  
 - `finetune_decoder.py` - text-only Whisper decoder fine-tuning
 - `requirements.txt` - project dependencies
 
