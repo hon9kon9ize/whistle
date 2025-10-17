@@ -76,6 +76,26 @@ class TLELightningModule(pl.LightningModule):
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
+    def validation_step(self, batch, batch_idx):
+        # Get teacher states
+        E_teacher = get_teacher_states(
+            batch["audio_arrays"], self.whisper, self.processor
+        )
+        _, T, _ = E_teacher.shape
+
+        # Text tokens
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+
+        # TLE forward
+        E_tilde, mu, logvar = self.tle(input_ids, attention_mask, target_T=T)
+
+        # Loss
+        loss = vae_loss(E_tilde, E_teacher, mu, logvar, self.beta)
+
+        self.log("val_loss", loss, prog_bar=True)
+        return loss
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.tle.parameters(), lr=2e-4, weight_decay=0.01)
         return optimizer
@@ -84,9 +104,10 @@ class TLELightningModule(pl.LightningModule):
 class TLEDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        datasets,
-        processor,
-        tokenizer,
+        train_datasets,
+        val_datasets=None,
+        processor=None,
+        tokenizer=None,
         batch_size: int = 8,
         text_column: str = "sentence",
         audio_column: str = "audio",
@@ -94,7 +115,8 @@ class TLEDataModule(pl.LightningDataModule):
         audio_sampling_rate_key: str = "sampling_rate",
     ):
         super().__init__()
-        self.datasets = datasets
+        self.train_datasets = train_datasets
+        self.val_datasets = val_datasets
         self.processor = processor
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -105,7 +127,7 @@ class TLEDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         return create_tle_data_loader(
-            datasets=self.datasets,
+            datasets=self.train_datasets,
             processor=self.processor,
             tokenizer=self.tokenizer,
             split="train",
@@ -119,9 +141,28 @@ class TLEDataModule(pl.LightningDataModule):
             audio_sampling_rate_key=self.audio_sampling_rate_key,
         )
 
+    def val_dataloader(self):
+        if self.val_datasets is None:
+            return None
+        return create_tle_data_loader(
+            datasets=self.val_datasets,
+            processor=self.processor,
+            tokenizer=self.tokenizer,
+            split="test",
+            batch_size=self.batch_size,
+            max_audio_length=30.0,
+            min_audio_length=0.5,
+            max_text_length=256,
+            text_column=self.text_column,
+            audio_column=self.audio_column,
+            audio_array_key=self.audio_array_key,
+            audio_sampling_rate_key=self.audio_sampling_rate_key,
+        )
+
 
 def train_with_dataset(
-    datasets,
+    train_datasets,
+    val_datasets=None,
     batch_size: int = 8,
     max_epochs: int = 1,
     max_steps: Optional[int] = None,
@@ -140,10 +181,11 @@ def train_with_dataset(
 
     # Data module
     data_module = TLEDataModule(
-        datasets,
-        processor,
-        tokenizer,
-        batch_size,
+        train_datasets=train_datasets,
+        val_datasets=val_datasets,
+        processor=processor,
+        tokenizer=tokenizer,
+        batch_size=batch_size,
         text_column=text_column,
         audio_column=audio_column,
         audio_array_key=audio_array_key,
@@ -196,26 +238,39 @@ def train_with_commonvoice(
     use_wandb: bool = False,
 ):
     if language_codes is None:
-        language_codes = ["en", "zh-CN", "zh-HK"]
+        language_codes = ["en", "zh-CN", "zh-HK", "yue"]
 
     # Load Common Voice datasets
-    datasets = {}
+    train_datasets = {}
+    val_datasets = {}
     for lang_code in language_codes:
         try:
             print(f"Loading {lang_code}...")
-            datasets[lang_code] = load_dataset(
+            train_datasets[lang_code] = load_dataset(
                 "mozilla-foundation/common_voice_16_1", lang_code, split="train"
+            )
+            val_datasets[lang_code] = load_dataset(
+                "mozilla-foundation/common_voice_16_1", lang_code, split="test"
             )
         except (ValueError, ConnectionError, RuntimeError) as e:
             print(f"Failed to load {lang_code}: {e}")
             continue
 
-    if not datasets:
+    if not train_datasets:
         raise ValueError("No datasets could be loaded")
+
+    print("Train dataset sizes:")
+    for key in train_datasets.keys():
+        print(key, ":", len(train_datasets[key]))
+
+    print("Val dataset sizes:")
+    for key in val_datasets.keys():
+        print(key, ":", len(val_datasets[key]))
 
     # Train with the loaded datasets
     return train_with_dataset(
-        datasets=datasets,
+        train_datasets=train_datasets,
+        val_datasets=val_datasets,
         batch_size=batch_size,
         max_epochs=max_epochs,
         max_steps=max_steps,
