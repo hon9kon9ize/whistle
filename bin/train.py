@@ -11,6 +11,13 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
 import argparse
+import logging
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 def load_whisper_models(
@@ -316,17 +323,17 @@ def train_with_preprocessed_dataset(
         else:
             dataset = load_dataset(dataset_path)
     except Exception as e:
-        print(f"Failed to load dataset from {dataset_path}: {e}")
+        logger.error(f"Failed to load dataset from {dataset_path}: {e}")
         raise
 
     # Print dataset info
     try:
-        print(f"Dataset loaded successfully")
+        logger.info(f"Dataset loaded successfully")
         if subset is not None:
-            print(f"Using subset: {subset}")
-        print(f"Using train_split='{train_split}', test_split='{test_split}'")
+            logger.info(f"Using subset: {subset}")
+        logger.info(f"Using train_split='{train_split}', test_split='{test_split}'")
     except:
-        print("Could not determine dataset info")
+        logger.warning("Could not determine dataset info")
 
     # Train with the loaded dataset
     return train_with_dataset(
@@ -409,6 +416,12 @@ if __name__ == "__main__":
         default="auto",
         choices=["auto", "32", "16", "bf16"],
         help="Precision for training (auto=detect best available, 32=full precision, 16=float16, bf16=bfloat16)",
+    )
+    parser.add_argument(
+        "--subset",
+        type=str,
+        default=None,
+        help="Dataset subset/configuration name (for datasets with multiple subsets)",
     )
 
     args = parser.parse_args()

@@ -6,6 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------
@@ -165,10 +169,10 @@ class TLEVAE(nn.Module):
     """
     Text-to-Latent VAE that outputs pseudo Whisper encoder states.
     Training usage:
-      E_tilde, mu, logvar = model(input_ids, attn_mask, target_T=E.size(1))
+      E_tilde, mu, logvar, length_pred = model(input_ids, attn_mask, target_T=E.size(1))
       loss = mse(E_tilde, E) + beta * KL
     Inference (text-only):
-      E_tilde, _, _ = model(input_ids, attn_mask, target_T=pred_T or heuristic)
+      E_tilde, _, _, _ = model(input_ids, attn_mask, target_T=pred_T or heuristic)
     """
 
     def __init__(self, cfg: TLEVAEConfig):

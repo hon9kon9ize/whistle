@@ -49,42 +49,6 @@ def safe_get_audio_info(
         return None
 
 
-def safe_get_audio_info(
-    item: Dict[str, Any], audio_column: str = "audio"
-) -> Optional[Dict[str, Any]]:
-    """
-    Safely extract audio information from a dataset item with error handling.
-
-    Args:
-        item: Dataset item dictionary
-        audio_column: Name of the audio column
-
-    Returns:
-        Audio info dict or None if extraction fails
-    """
-    try:
-        audio_info = item.get(audio_column)
-        if audio_info is None:
-            logger.warning(f"Missing audio column '{audio_column}' in item")
-            return None
-
-        # Handle different audio formats
-        if isinstance(audio_info, dict):
-            if "array" not in audio_info:
-                logger.warning(f"Missing 'array' key in audio info")
-                return None
-            return audio_info
-        elif isinstance(audio_info, (list, np.ndarray)):
-            # Handle raw audio arrays
-            return {"array": audio_info, "sampling_rate": 16000}  # Assume 16kHz
-        else:
-            logger.warning(f"Unsupported audio format: {type(audio_info)}")
-            return None
-    except Exception as e:
-        logger.error(f"Error extracting audio info: {e}")
-        return None
-
-
 def apply_audio_augmentation(
     audio_array: np.ndarray, augmentation_type: str = "telephony", **kwargs
 ) -> np.ndarray:
@@ -153,7 +117,7 @@ class PreprocessedAudioTextDataset(Dataset):
         self.dataset = hf_dataset[split] if split in hf_dataset else hf_dataset
         self.augment = augment
         self.original_length = len(self.dataset)
-        print(f"Loaded {self.original_length} preprocessed samples")
+        logger.info(f"Loaded {self.original_length} preprocessed samples")
 
     def __len__(self) -> int:
         if self.augment:
@@ -245,11 +209,11 @@ class AudioTextDataset(Dataset):
         # Skip filtering for faster data loading - validation happens in __getitem__
         try:
             self.original_length = len(self.dataset)
-            print(f"Loaded {self.original_length} samples (unfiltered)")
+            logger.info(f"Loaded {self.original_length} samples (unfiltered)")
         except (TypeError, AttributeError):
             # IterableDataset doesn't have __len__
             self.original_length = None
-            print("Loaded streaming dataset (length unknown)")
+            logger.info("Loaded streaming dataset (length unknown)")
 
     def __len__(self) -> int:
         if self.original_length is None:
@@ -389,7 +353,7 @@ class CommonVoiceDataset(Dataset):
             except (KeyError, ValueError, TypeError):
                 continue
 
-        print(
+        logger.info(
             f"Loaded {len(self.valid_indices)} valid samples from {len(self.dataset)} total"
         )
 
@@ -494,7 +458,7 @@ class MultilingualAudioTextDataset(Dataset):
         if not self.datasets:
             raise ValueError("No valid datasets found")
 
-        print(
+        logger.info(
             f"Combined dataset with {total_samples} samples across {len(self.datasets)} datasets"
         )
 
@@ -572,7 +536,7 @@ class MultilingualCommonVoiceDataset(Dataset):
         if not self.datasets:
             raise ValueError("No valid datasets found")
 
-        print(
+        logger.info(
             f"Combined dataset with {total_samples} samples across {len(self.datasets)} languages"
         )
 
