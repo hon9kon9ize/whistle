@@ -7,8 +7,9 @@ __pycache__
 .venv
 *.ipynb
 tmp/*
-checkpoints/*
 .vscode/*
 pyrightconfig.json
 lightning_logs/*
 logs/*
+checkpoints/*
+lightning_logs

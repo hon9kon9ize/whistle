@@ -166,12 +166,12 @@ After training the TLE model, you can fine-tune the Whisper decoder using text-o
 ### Phase 2: Text-Only Decoder Fine-Tuning
 
 ```bash
-# Planned: Fine-tune Whisper decoder with TLE (coming soon)
-# python bin/finetune_decoder.py \
-#   --tle-checkpoint "checkpoints/tle-epoch=XX-step=XXXXX.ckpt" \
-#   --dataset "path/to/text/dataset" \
-#   --language "en" \
-#   --max-steps 50000
+# Fine-tune Whisper decoder with TLE on text-only data
+python bin/finetune_decoder.py \
+  --tle-checkpoint "checkpoints/tle-epoch=XX-step=XXXXX.ckpt" \
+  --dataset "path/to/text/dataset" \
+  --batch-size 4 \
+  --max-steps 50000
 ```
 
 ### How It Works
@@ -218,12 +218,12 @@ The paper reports that TLE provides effective domain adaptation for speech recog
 - **Dataset Compatibility**: Support for Common Voice and custom preprocessed datasets
 - **Audio Augmentation**: 8kHz resampling + μ-law compression for training
 - **Model Architecture**: Full TLE-VAE implementation with FiLM modulation
+- **KL Scheduling & Free-bits**: Linear β-annealing and free-bits regularization to prevent posterior collapse
+- **Language Conditioning**: Language ID embeddings for English (en), Mandarin (zh), and Cantonese (yue)
+- **Text-Only Fine-Tuning**: Complete `finetune_decoder.py` script for Phase 2 decoder adaptation
 
 ### 🚧 Planned Features
 
-- **Text-Only Fine-Tuning**: `finetune_decoder.py` script for Phase 2 decoder adaptation
-- **Advanced Data Loading**: `tle/utils.py` with enhanced data utilities
-- **Evaluation Suite**: Automated WER/CER evaluation scripts
 - **Model Zoo**: Pre-trained TLE checkpoints
 
 ### 🎯 Current Status
@@ -232,27 +232,29 @@ The paper reports that TLE provides effective domain adaptation for speech recog
 |-----------|--------|----------|
 | TLE Training | ✅ Complete | - |
 | Dataset Loading | ✅ Complete | - |
-| Text-Only Fine-Tuning | ❌ Not implemented | High |
-| Evaluation Tools | ❌ Not implemented | Low |
+| Text-Only Fine-Tuning | ✅ Complete | - |
+| KL Scheduling & Free-bits | ✅ Complete | - |
+| Language Conditioning | ✅ Complete | - |
+| Advanced Data Loading | ✅ Complete | - |
+| Model Zoo | ❌ Not implemented | Low |
 
 ---
 
-## �📁 Repository Structure
+##  Repository Structure
 
 ```
 whistle/
 ├── tle/
 │   ├── tle.py        # TLEVAE + ResidualConv1dFiLM + loss
-├── teacher.py        # feature extraction, teacher state cache
-├── train.py          # supervised training loop
+│   ├── data.py       # Data loading utilities and audio processing
+│   └── utils.py      # Additional utility functions
+├── bin/
+│   ├── train.py      # TLE training script
+│   └── finetune_decoder.py  # Text-only Whisper decoder fine-tuning
+├── checkpoints/      # Model checkpoints
+├── test.ipynb        # Smoke tests and validation
 └── README.md
 ```
-
-**Planned additions:**
-- `tle/utils.py` - data loading utilities and helper functions
-- `tle/data.py` - dataset classes  
-- `finetune_decoder.py` - text-only Whisper decoder fine-tuning
-- `requirements.txt` - project dependencies
 
 ---
 

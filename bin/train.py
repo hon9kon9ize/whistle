@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer, WhisperProcessor, WhisperModel
 from whistle.tle.tle import TLEVAE, TLEVAEConfig, vae_loss
-from whistle.tle.utils import get_teacher_states
+from whistle.tle.utils import get_teacher_states, augment_teacher_states
 from whistle.tle.data import create_tle_data_loader, create_preprocessed_data_loader
 from datasets import load_dataset
 import torch
@@ -45,16 +45,30 @@ def create_tle_config(
 
 
 class TLELightningModule(pl.LightningModule):
-    def __init__(
-        self, cfg: TLEVAEConfig, whisper_model, processor, tokenizer, beta: float = 0.1
-    ):
+    def __init__(self, cfg: TLEVAEConfig, whisper_model, processor, tokenizer):
         super().__init__()
         self.cfg = cfg
         self.tle = TLEVAE(cfg)
         self.whisper = whisper_model
         self.processor = processor
         self.tokenizer = tokenizer
-        self.beta = beta
+
+    def get_current_beta(self) -> float:
+        """Compute current beta value based on training step for annealing."""
+        if not self.training:
+            return self.cfg.beta_end  # use final beta for validation
+
+        current_step = self.global_step
+        if current_step < self.cfg.beta_warmup_steps:
+            # Linear annealing from beta_start to beta_end
+            progress = current_step / self.cfg.beta_warmup_steps
+            beta = self.cfg.beta_start + progress * (
+                self.cfg.beta_end - self.cfg.beta_start
+            )
+        else:
+            beta = self.cfg.beta_end
+
+        return beta
 
     def forward(self, input_ids, attention_mask=None, target_T=None):
         return self.tle(input_ids, attention_mask, target_T)
@@ -66,17 +80,41 @@ class TLELightningModule(pl.LightningModule):
         )
         _, T, _ = E_teacher.shape
 
-        # Text tokens
+        # Apply noise and time-jitter augmentation to teacher states
+        E_teacher = augment_teacher_states(
+            E_teacher,
+            noise_std=self.cfg.teacher_noise_std,
+            time_jitter_max=self.cfg.teacher_time_jitter_max,
+        )
+
+        # Text tokens and language IDs
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
+        lang_ids = batch["lang_ids"]
 
         # TLE forward
-        E_tilde, mu, logvar = self.tle(input_ids, attention_mask, target_T=T)
+        E_tilde, mu, logvar, length_pred = self.tle(
+            input_ids, attention_mask, target_T=T, lang_ids=lang_ids
+        )
 
-        # Loss
-        loss = vae_loss(E_tilde, E_teacher, mu, logvar, self.beta)
+        # Get current beta for annealing
+        beta = self.get_current_beta()
+
+        # Loss with free-bits and auxiliary length loss
+        loss = vae_loss(
+            E_tilde,
+            E_teacher,
+            mu,
+            logvar,
+            beta,
+            self.cfg.free_bits_threshold,
+            length_pred=length_pred,
+            length_target=batch["lengths"],
+            length_loss_weight=self.cfg.length_loss_weight,
+        )
 
         self.log("train_loss", loss, prog_bar=True)
+        self.log("train_beta", beta, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -86,15 +124,31 @@ class TLELightningModule(pl.LightningModule):
         )
         _, T, _ = E_teacher.shape
 
-        # Text tokens
+        # Text tokens and language IDs
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
+        lang_ids = batch["lang_ids"]
 
         # TLE forward
-        E_tilde, mu, logvar = self.tle(input_ids, attention_mask, target_T=T)
+        E_tilde, mu, logvar, length_pred = self.tle(
+            input_ids, attention_mask, target_T=T, lang_ids=lang_ids
+        )
 
-        # Loss
-        loss = vae_loss(E_tilde, E_teacher, mu, logvar, self.beta)
+        # Use final beta for validation
+        beta = self.cfg.beta_end
+
+        # Loss with free-bits and auxiliary length loss
+        loss = vae_loss(
+            E_tilde,
+            E_teacher,
+            mu,
+            logvar,
+            beta,
+            self.cfg.free_bits_threshold,
+            length_pred=length_pred,
+            length_target=batch["lengths"],
+            length_loss_weight=self.cfg.length_loss_weight,
+        )
 
         self.log("val_loss", loss, prog_bar=True)
         return loss
@@ -158,6 +212,7 @@ def train_with_dataset(
     test_split: str = "test",
     use_wandb: bool = False,
     augment: bool = False,
+    precision: str = "auto",
 ):
     """Train TLE with provided dataset that has train/test splits."""
     # Load models
@@ -199,9 +254,19 @@ def train_with_dataset(
     if max_steps is not None:
         trainer_kwargs["max_steps"] = max_steps
 
-    # Use bfloat16 if available
-    if device == "cuda" and torch.cuda.is_bf16_supported():
+    # Use mixed precision if available
+    if precision == "auto":
+        if device == "cuda":
+            if torch.cuda.is_bf16_supported():
+                trainer_kwargs["precision"] = "bf16-mixed"
+            elif torch.cuda.is_available():
+                trainer_kwargs["precision"] = "16-mixed"
+        # else use default (32-bit)
+    elif precision == "bf16":
         trainer_kwargs["precision"] = "bf16-mixed"
+    elif precision == "16":
+        trainer_kwargs["precision"] = "16-mixed"
+    # precision == "32" uses default full precision
 
     trainer = Trainer(**trainer_kwargs)
 
@@ -223,6 +288,7 @@ def train_with_preprocessed_dataset(
     subset: Optional[str] = None,
     use_wandb: bool = False,
     augment: bool = False,
+    precision: str = "auto",
 ):
     """
     Train TLE with a preprocessed dataset that has train/test splits.
@@ -238,7 +304,8 @@ def train_with_preprocessed_dataset(
         test_split: Name of the test/validation split
         subset: Dataset subset/configuration name
         use_wandb: Enable Weights & Biases logging
-        augment: Apply telephony augmentation
+        augment: Apply random audio augmentation
+        precision: Mixed precision mode (auto, 32, 16, bf16)
     """
     print(f"Loading preprocessed dataset from: {dataset_path}")
 
@@ -273,6 +340,7 @@ def train_with_preprocessed_dataset(
         test_split=test_split,
         use_wandb=use_wandb,
         augment=augment,
+        precision=precision,
     )
 
 
@@ -333,13 +401,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--augment",
         action="store_true",
-        help="Apply telephony augmentation (8kHz resampling + μ-law) to training and validation datasets",
+        help="Apply random audio augmentation (telephony, noise, pitch_shift, time_stretch) to training and validation datasets",
     )
     parser.add_argument(
-        "--subset",
+        "--precision",
         type=str,
-        default=None,
-        help="Dataset subset/configuration name (for datasets with multiple subsets)",
+        default="auto",
+        choices=["auto", "32", "16", "bf16"],
+        help="Precision for training (auto=detect best available, 32=full precision, 16=float16, bf16=bfloat16)",
     )
 
     args = parser.parse_args()
@@ -360,4 +429,5 @@ if __name__ == "__main__":
         subset=args.subset,
         use_wandb=args.use_wandb,
         augment=args.augment,
+        precision=args.precision,
     )

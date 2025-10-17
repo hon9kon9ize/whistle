@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from typing import List
 from transformers import WhisperProcessor, WhisperModel
@@ -49,35 +50,47 @@ def get_teacher_states(
         raise RuntimeError(f"Failed to extract teacher states: {str(e)}") from e
 
 
-def validate_audio_batch(
-    audio_list: List[np.ndarray], expected_sr: int = 16000
-) -> None:
+def augment_teacher_states(
+    E_teacher: torch.Tensor,
+    noise_std: float = 0.01,
+    time_jitter_max: float = 0.1,
+) -> torch.Tensor:
     """
-    Validate audio batch for consistency and basic quality checks.
+    Apply noise and time-jitter augmentations to teacher encoder states.
 
     Args:
-        audio_list: List of audio arrays to validate
-        expected_sr: Expected sampling rate
+        E_teacher: Teacher encoder states (B, T, H)
+        noise_std: Standard deviation for Gaussian noise
+        time_jitter_max: Maximum time shift in frames (int(time_jitter_max * T))
 
-    Raises:
-        ValueError: If validation fails
+    Returns:
+        Augmented teacher states (B, T, H)
     """
-    if not audio_list:
-        raise ValueError("Empty audio list")
+    B, T, H = E_teacher.shape
+    device = E_teacher.device
 
-    for i, audio in enumerate(audio_list):
-        if not isinstance(audio, np.ndarray):
-            raise ValueError(f"Audio {i} is not a numpy array")
+    # Apply Gaussian noise
+    if noise_std > 0:
+        noise = torch.randn_like(E_teacher) * noise_std
+        E_teacher = E_teacher + noise
 
-        if audio.dtype not in [np.float32, np.float64, np.int16, np.int32]:
-            raise ValueError(f"Audio {i} has unsupported dtype: {audio.dtype}")
+    # Apply random time shift (jitter)
+    if time_jitter_max > 0:
+        max_shift = int(time_jitter_max * T)
+        if max_shift > 0:
+            # Sample random shifts for each batch item
+            shifts = torch.randint(-max_shift, max_shift + 1, (B,), device=device)
 
-        if audio.size == 0:
-            raise ValueError(f"Audio {i} is empty")
+            augmented_states = []
+            for i in range(B):
+                shift = shifts[i].item()
+                if shift != 0:
+                    # Circular shift along time dimension
+                    E_i = torch.roll(E_teacher[i], shifts=int(shift), dims=0)
+                    augmented_states.append(E_i)
+                else:
+                    augmented_states.append(E_teacher[i])
 
-        # Basic duration check (too short/long might indicate issues)
-        duration = len(audio) / expected_sr
-        if duration < 0.1:  # Less than 100ms
-            raise ValueError(f"Audio {i} too short: {duration:.2f}s")
-        if duration > 30.0:  # More than 30s
-            raise ValueError(f"Audio {i} too long: {duration:.2f}s")
+            E_teacher = torch.stack(augmented_states, dim=0)
+
+    return E_teacher

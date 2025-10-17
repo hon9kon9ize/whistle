@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 # ---------------------------
@@ -94,6 +95,24 @@ class TLEVAEConfig:
     z_dim: int = 256  # global latent
     n_res_blocks: int = 6
     beta: float = 0.1  # KL weight
+    # KL scheduling parameters
+    beta_start: float = 0.0  # starting beta for annealing
+    beta_end: float = 1.0  # final beta value
+    beta_warmup_steps: int = 10000  # steps to anneal beta from start to end
+    # Free-bits parameters
+    free_bits_threshold: float = 0.5  # KL per dim threshold (in nats)
+    # Language conditioning parameters
+    num_languages: int = 3  # en, zh, yue
+    lang_embed_dim: int = 32  # small language embedding dimension
+    # Teacher state augmentation parameters
+    teacher_noise_std: float = 0.01  # Gaussian noise std for teacher states
+    teacher_time_jitter_max: float = 0.1  # Max time stretch factor (±10%)
+    # Length prediction parameters
+    length_loss_weight: float = 0.1  # weight for auxiliary length loss
+    # Performance optimization parameters
+    gradient_checkpointing: bool = (
+        True  # Enable gradient checkpointing for memory efficiency
+    )
 
 
 class TLETextEncoder(nn.Module):
@@ -102,6 +121,10 @@ class TLETextEncoder(nn.Module):
     def __init__(self, cfg: TLEVAEConfig):
         super().__init__()
         self.embed = nn.Embedding(cfg.vocab_size, cfg.text_hidden)
+        self.lang_embed = nn.Embedding(cfg.num_languages, cfg.lang_embed_dim)
+        # Project language embedding to match text_hidden dimension
+        self.lang_proj = nn.Linear(cfg.lang_embed_dim, cfg.text_hidden)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.text_hidden,
             nhead=cfg.n_text_heads,
@@ -115,9 +138,20 @@ class TLETextEncoder(nn.Module):
         )
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        lang_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = self.embed(input_ids)  # (B, L, D_text)
+
+        # Add language conditioning if provided
+        if lang_ids is not None:
+            # lang_ids: (B,) -> (B, lang_embed_dim) -> (B, D_text) -> (B, 1, D_text)
+            lang_emb = self.lang_proj(self.lang_embed(lang_ids))  # (B, D_text)
+            lang_emb = lang_emb.unsqueeze(1)  # (B, 1, D_text)
+            x = x + lang_emb  # Broadcast to all tokens in sequence
+
         if attention_mask is not None:
             # Transformer expects True = keep, so invert mask
             key_padding_mask = ~attention_mask.bool()
@@ -148,6 +182,8 @@ class TLEVAE(nn.Module):
         # Global latent heads from pooled text features
         self.mu_head = nn.Linear(cfg.text_hidden, cfg.z_dim)
         self.logvar_head = nn.Linear(cfg.text_hidden, cfg.z_dim)
+        # Length prediction head for auxiliary loss
+        self.length_head = nn.Linear(cfg.text_hidden, 1)
 
         # Residual Conv stack over time with FiLM(z)
         self.pe = PositionalEncoding(cfg.whisper_hidden)
@@ -192,11 +228,13 @@ class TLEVAE(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         target_T: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        lang_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Returns: (E_tilde, mu, logvar)
-          E_tilde: (B, T, H)
-          mu, logvar: (B, z_dim)
+        Returns: (E_tilde, mu, logvar, length_pred)
+          E_tilde: predicted encoder states (B, T, H)
+          mu, logvar: latent parameters (B, z_dim)
+          length_pred: predicted sequence length (B,)
         """
         B, L = input_ids.shape
 
@@ -207,9 +245,15 @@ class TLEVAE(nn.Module):
             ), f"attention_mask shape {attention_mask.shape} != input_ids shape {input_ids.shape}"
         if target_T is not None:
             assert target_T > 0, f"target_T must be positive, got {target_T}"
+        if lang_ids is not None:
+            assert lang_ids.shape == (
+                B,
+            ), f"lang_ids shape {lang_ids.shape} != (B,) = {(B,)}"
 
         # 1) Text encoder
-        text_feats = self.text_encoder(input_ids, attention_mask)  # (B, L, D_text)
+        text_feats = self.text_encoder(
+            input_ids, attention_mask, lang_ids
+        )  # (B, L, D_text)
 
         # 2) Global latent z from pooled text features
         pooled = (
@@ -224,6 +268,8 @@ class TLEVAE(nn.Module):
         pooled = pooled / denom[:, None]  # (B, D_text)
         mu = self.mu_head(pooled)  # (B, z_dim)
         logvar = self.logvar_head(pooled)  # (B, z_dim)
+        # Length prediction for auxiliary loss
+        length_pred = self.length_head(pooled).squeeze(-1)  # (B,)
         z = self.reparameterize(mu, logvar)  # (B, z_dim)
 
         # 3) Seed time sequence by interpolating text→H to target_T
@@ -234,13 +280,17 @@ class TLEVAE(nn.Module):
         x = self._interp_time(seed, target_T)  # (B, T, H)
         x = self.pe(x)  # add positional encoding
 
-        # 4) Residual Conv stack with FiLM(z)
+        # 4) Residual Conv stack with FiLM(z) - use gradient checkpointing for memory efficiency
         for block in self.resblocks:
-            x = block(x, z)  # (B, T, H)
+            # Use gradient checkpointing to reduce memory usage during training
+            if self.training and self.cfg.gradient_checkpointing:
+                x = checkpoint(block, x, z, use_reentrant=False)
+            else:
+                x = block(x, z)  # (B, T, H)
 
         # 5) Final projection
         E_tilde = self.proj_out(x)  # (B, T, H)
-        return E_tilde, mu, logvar
+        return E_tilde, mu, logvar, length_pred
 
 
 # ---------------------------
@@ -252,12 +302,44 @@ def vae_loss(
     mu: torch.Tensor,
     logvar: torch.Tensor,
     beta: float,
+    free_bits_threshold: float = 0.0,
+    length_pred: Optional[torch.Tensor] = None,
+    length_target: Optional[torch.Tensor] = None,
+    length_loss_weight: float = 0.1,
 ) -> torch.Tensor:
     """
-    MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) )
+    MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) ) with optional free-bits + optional length loss
+
+    Args:
+        E_tilde: predicted encoder states (B, T, H)
+        E_teacher: teacher encoder states (B, T, H)
+        mu: latent mean (B, z_dim)
+        logvar: latent log variance (B, z_dim)
+        beta: KL weight coefficient
+        free_bits_threshold: minimum KL per dimension to penalize (in nats)
+        length_pred: predicted sequence lengths (B,)
+        length_target: target sequence lengths (B,)
+        length_loss_weight: weight for auxiliary length loss
     """
     mse = F.mse_loss(E_tilde, E_teacher)
-    # Clamp logvar for numerical stability in KL computation
-    logvar = torch.clamp(logvar, min=-10, max=10)
-    kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    return mse + beta * kl
+
+    # Compute KL per dimension
+    # KL(q(z) || N(0,I)) = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (B, z_dim)
+
+    # Apply free-bits: only penalize KL above threshold
+    if free_bits_threshold > 0:
+        kl_per_dim = torch.clamp(kl_per_dim - free_bits_threshold, min=0)
+
+    # Average over batch and dimensions
+    kl = kl_per_dim.mean()
+
+    loss = mse + beta * kl
+
+    # Add auxiliary length loss if provided
+    if length_pred is not None and length_target is not None:
+        # Use L1 loss for length prediction (more robust to outliers than MSE)
+        length_loss = F.l1_loss(length_pred, length_target.float())
+        loss = loss + length_loss_weight * length_loss
+
+    return loss
