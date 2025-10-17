@@ -204,7 +204,7 @@ def train_with_commonvoice(
         try:
             print(f"Loading {lang_code}...")
             datasets[lang_code] = load_dataset(
-                "mozilla-foundation/common_voice_16_1", lang_code, split="train[:1000]"
+                "mozilla-foundation/common_voice_16_1", lang_code, split="train"
             )
         except (ValueError, ConnectionError, RuntimeError) as e:
             print(f"Failed to load {lang_code}: {e}")
