@@ -121,7 +121,48 @@ loss.backward()
 
 ---
 
-## 🌍 Multilingual Training
+## � Training
+
+### Command-Line Training
+
+Train TLE on paired audio-text data using the provided training script:
+
+```bash
+# Train on Common Voice dataset
+python bin/train.py \
+  --dataset "mozilla-foundation/common_voice_16_1" \
+  --subset "yue" \
+  --batch-size 4 \
+  --max-steps 100000 \
+  --save-every 1000
+
+# Train on custom preprocessed dataset
+python bin/train.py \
+  --dataset "path/to/your/preprocessed/dataset" \
+  --train-split "train" \
+  --test-split "validation" \
+  --batch-size 8 \
+  --max-epochs 10 \
+  --augment
+```
+
+### Training Arguments
+
+- `--dataset`: HuggingFace dataset name or local path
+- `--subset`: Dataset subset/configuration (e.g., language code)
+- `--train-split`, `--test-split`: Names of train/test splits (default: "train", "test")
+- `--batch-size`: Training batch size (default: 4)
+- `--max-steps`: Maximum training steps (alternative to `--max-epochs`)
+- `--max-epochs`: Maximum training epochs (default: 1)
+- `--save-every`: Save checkpoint every N steps (default: 1000)
+- `--augment`: Apply audio augmentation (8kHz resampling + μ-law)
+- `--device`: Device to use ("cuda" or "cpu", auto-detected if not specified)
+
+The script automatically loads Whisper models, creates the TLE configuration, and trains using PyTorch Lightning with automatic checkpointing.
+
+---
+
+## �🌍 Multilingual Training
 
 To build a multilingual TLE:
 
