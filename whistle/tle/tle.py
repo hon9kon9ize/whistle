@@ -261,8 +261,3 @@ def vae_loss(
     logvar = torch.clamp(logvar, min=-10, max=10)
     kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     return mse + beta * kl
-
-
-def clip_gradients(model: nn.Module, max_norm: float = 1.0) -> None:
-    """Clip gradients to prevent exploding gradients during training."""
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
