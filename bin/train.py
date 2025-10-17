@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer, WhisperProcessor, WhisperModel
 from whistle.tle.tle import TLEVAE, TLEVAEConfig, vae_loss
 from whistle.tle.utils import get_teacher_states
-from whistle.tle.data import create_tle_data_loader
+from whistle.tle.data import create_tle_data_loader, create_preprocessed_data_loader
 from datasets import load_dataset
 import torch
 from typing import List, Optional, Tuple
@@ -36,8 +36,11 @@ def create_tle_config(
     tokenizer: AutoTokenizer, whisper_model: WhisperModel
 ) -> TLEVAEConfig:
     """Create TLEVAE configuration."""
+    # Whisper tokenizer has incorrect vocab_size reporting, use actual size
+    # From testing: max token ID is 51865, so vocab_size should be 51866
+    actual_vocab_size = 51866
     return TLEVAEConfig(
-        vocab_size=tokenizer.vocab_size, whisper_hidden=whisper_model.config.d_model
+        vocab_size=actual_vocab_size, whisper_hidden=whisper_model.config.d_model
     )
 
 
@@ -104,92 +107,72 @@ class TLELightningModule(pl.LightningModule):
 class TLEDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        train_datasets,
-        val_datasets=None,
+        dataset,
         processor=None,
         tokenizer=None,
         batch_size: int = 8,
-        text_column: str = "sentence",
-        audio_column: str = "audio",
-        audio_array_key: str = "array",
-        audio_sampling_rate_key: str = "sampling_rate",
+        train_split: str = "train",
+        test_split: str = "test",
+        augment: bool = False,
     ):
         super().__init__()
-        self.train_datasets = train_datasets
-        self.val_datasets = val_datasets
+        self.dataset = dataset
         self.processor = processor
         self.tokenizer = tokenizer
         self.batch_size = batch_size
-        self.text_column = text_column
-        self.audio_column = audio_column
-        self.audio_array_key = audio_array_key
-        self.audio_sampling_rate_key = audio_sampling_rate_key
+        self.train_split = train_split
+        self.test_split = test_split
+        self.augment = augment
 
     def train_dataloader(self):
-        return create_tle_data_loader(
-            datasets=self.train_datasets,
+        return create_preprocessed_data_loader(
+            dataset=self.dataset,
             processor=self.processor,
             tokenizer=self.tokenizer,
-            split="train",
+            split=self.train_split,
             batch_size=self.batch_size,
-            max_audio_length=30.0,
-            min_audio_length=0.5,
             max_text_length=256,
-            text_column=self.text_column,
-            audio_column=self.audio_column,
-            audio_array_key=self.audio_array_key,
-            audio_sampling_rate_key=self.audio_sampling_rate_key,
+            augment=self.augment,
         )
 
     def val_dataloader(self):
-        if self.val_datasets is None:
-            return None
-        return create_tle_data_loader(
-            datasets=self.val_datasets,
+        return create_preprocessed_data_loader(
+            dataset=self.dataset,
             processor=self.processor,
             tokenizer=self.tokenizer,
-            split="test",
+            split=self.test_split,
             batch_size=self.batch_size,
-            max_audio_length=30.0,
-            min_audio_length=0.5,
             max_text_length=256,
-            text_column=self.text_column,
-            audio_column=self.audio_column,
-            audio_array_key=self.audio_array_key,
-            audio_sampling_rate_key=self.audio_sampling_rate_key,
+            augment=self.augment,
         )
 
 
 def train_with_dataset(
-    train_datasets,
-    val_datasets=None,
+    dataset,
     batch_size: int = 8,
     max_epochs: int = 1,
     max_steps: Optional[int] = None,
     save_every: int = 1000,
     device: str = "cuda",
-    text_column: str = "sentence",
-    audio_column: str = "audio",
-    audio_array_key: str = "array",
-    audio_sampling_rate_key: str = "sampling_rate",
+    train_split: str = "train",
+    test_split: str = "test",
     use_wandb: bool = False,
+    augment: bool = False,
 ):
-    """Train TLE with provided datasets dictionary."""
+    """Train TLE with provided dataset that has train/test splits."""
     # Load models
     whisper_model, processor, tokenizer = load_whisper_models(device)
     cfg = create_tle_config(tokenizer, whisper_model)
 
     # Data module
     data_module = TLEDataModule(
-        train_datasets=train_datasets,
-        val_datasets=val_datasets,
+        dataset=dataset,
         processor=processor,
         tokenizer=tokenizer,
         batch_size=batch_size,
-        text_column=text_column,
-        audio_column=audio_column,
-        audio_array_key=audio_array_key,
-        audio_sampling_rate_key=audio_sampling_rate_key,
+        train_split=train_split,
+        test_split=test_split,
+        augment=augment,
     )
 
     # Model
@@ -228,71 +211,92 @@ def train_with_dataset(
     return model
 
 
-def train_with_commonvoice(
-    language_codes: Optional[List[str]] = None,
+def train_with_preprocessed_dataset(
+    dataset_path: str,
     batch_size: int = 8,
     max_epochs: int = 1,
     max_steps: Optional[int] = None,
     save_every: int = 1000,
     device: str = "cuda",
+    train_split: str = "train",
+    test_split: str = "test",
+    subset: Optional[str] = None,
     use_wandb: bool = False,
+    augment: bool = False,
 ):
-    if language_codes is None:
-        language_codes = ["en", "zh-CN", "zh-HK", "yue"]
+    """
+    Train TLE with a preprocessed dataset that has train/test splits.
 
-    # Load Common Voice datasets
-    train_datasets = {}
-    val_datasets = {}
-    for lang_code in language_codes:
-        try:
-            print(f"Loading {lang_code}...")
-            train_datasets[lang_code] = load_dataset(
-                "mozilla-foundation/common_voice_16_1", lang_code, split="train"
-            )
-            val_datasets[lang_code] = load_dataset(
-                "mozilla-foundation/common_voice_16_1", lang_code, split="test"
-            )
-        except (ValueError, ConnectionError, RuntimeError) as e:
-            print(f"Failed to load {lang_code}: {e}")
-            continue
+    Args:
+        dataset_path: Path to the preprocessed dataset (HuggingFace dataset path or local path)
+        batch_size: Batch size for training
+        max_epochs: Maximum number of epochs
+        max_steps: Maximum number of training steps
+        save_every: Save checkpoint every N steps
+        device: Device to use for training
+        train_split: Name of the training split
+        test_split: Name of the test/validation split
+        subset: Dataset subset/configuration name
+        use_wandb: Enable Weights & Biases logging
+        augment: Apply telephony augmentation
+    """
+    print(f"Loading preprocessed dataset from: {dataset_path}")
 
-    if not train_datasets:
-        raise ValueError("No datasets could be loaded")
+    # Load the preprocessed dataset
+    try:
+        if subset is not None:
+            dataset = load_dataset(dataset_path, subset)
+        else:
+            dataset = load_dataset(dataset_path)
+    except Exception as e:
+        print(f"Failed to load dataset from {dataset_path}: {e}")
+        raise
 
-    print("Train dataset sizes:")
-    for key in train_datasets.keys():
-        print(key, ":", len(train_datasets[key]))
+    # Print dataset info
+    try:
+        print(f"Dataset loaded successfully")
+        if subset is not None:
+            print(f"Using subset: {subset}")
+        print(f"Using train_split='{train_split}', test_split='{test_split}'")
+    except:
+        print("Could not determine dataset info")
 
-    print("Val dataset sizes:")
-    for key in val_datasets.keys():
-        print(key, ":", len(val_datasets[key]))
-
-    # Train with the loaded datasets
+    # Train with the loaded dataset
     return train_with_dataset(
-        train_datasets=train_datasets,
-        val_datasets=val_datasets,
+        dataset=dataset,
         batch_size=batch_size,
         max_epochs=max_epochs,
         max_steps=max_steps,
         save_every=save_every,
         device=device,
-        text_column="sentence",  # Common Voice specific
-        audio_column="audio",
-        audio_array_key="array",
-        audio_sampling_rate_key="sampling_rate",
+        train_split=train_split,
+        test_split=test_split,
         use_wandb=use_wandb,
+        augment=augment,
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train TLE model with Common Voice datasets"
+        description="Train TLE model with preprocessed audio-text datasets"
     )
     parser.add_argument(
-        "--language-codes",
+        "--dataset",
         type=str,
-        default="en,zh-CN,zh-HK",
-        help="Comma-separated list of language codes (default: en,zh-CN,zh-HK)",
+        required=True,
+        help="Path to the preprocessed dataset (HuggingFace dataset name or local path)",
+    )
+    parser.add_argument(
+        "--train-split",
+        type=str,
+        default="train",
+        help="Name of the training split (default: train)",
+    )
+    parser.add_argument(
+        "--test-split",
+        type=str,
+        default="test",
+        help="Name of the test/validation split (default: test)",
     )
     parser.add_argument(
         "--batch-size", type=int, default=4, help="Batch size for training (default: 4)"
@@ -326,22 +330,34 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable Weights & Biases logging",
     )
+    parser.add_argument(
+        "--augment",
+        action="store_true",
+        help="Apply telephony augmentation (8kHz resampling + μ-law) to training and validation datasets",
+    )
+    parser.add_argument(
+        "--subset",
+        type=str,
+        default=None,
+        help="Dataset subset/configuration name (for datasets with multiple subsets)",
+    )
 
     args = parser.parse_args()
-
-    # Parse language codes
-    language_codes = args.language_codes.split(",") if args.language_codes else None
 
     # Auto-detect device if not specified
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     # Train
-    trained_model = train_with_commonvoice(
-        language_codes=language_codes,
+    trained_model = train_with_preprocessed_dataset(
+        dataset_path=args.dataset,
         batch_size=args.batch_size,
         max_epochs=args.max_epochs,
         max_steps=args.max_steps,
         save_every=args.save_every,
         device=device,
+        train_split=args.train_split,
+        test_split=args.test_split,
+        subset=args.subset,
         use_wandb=args.use_wandb,
+        augment=args.augment,
     )

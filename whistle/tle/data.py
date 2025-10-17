@@ -8,6 +8,85 @@ from datasets import Dataset as HFDataset
 from datasets import DatasetDict, IterableDataset, IterableDatasetDict
 
 
+class PreprocessedAudioTextDataset(Dataset):
+    """
+    Dataset for preprocessed audio-text data.
+
+    Assumes data is already filtered, resampled, and formatted correctly.
+    Expects columns: audio_array (numpy array), text (string)
+    """
+
+    def __init__(
+        self,
+        hf_dataset: HFDataset | DatasetDict | IterableDataset | IterableDatasetDict,
+        split: str = "train",
+        augment: bool = False,
+    ):
+        """
+        Args:
+            hf_dataset: Loaded HuggingFace dataset with preprocessed data
+            split: Dataset split to use ("train", "test")
+            augment: Whether to apply telephony augmentation (8kHz resampling + μ-law)
+        """
+        self.dataset = hf_dataset[split] if split in hf_dataset else hf_dataset
+        self.augment = augment
+        self.original_length = len(self.dataset)
+        print(f"Loaded {self.original_length} preprocessed samples")
+
+    def __len__(self) -> int:
+        if self.augment:
+            return 2 * self.original_length
+        return self.original_length
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Get a single data sample."""
+        if self.augment and idx >= self.original_length:
+            # Augmented sample
+            actual_idx = idx - self.original_length
+            augment_sample = True
+        else:
+            # Original sample
+            actual_idx = idx
+            augment_sample = False
+
+        item = self.dataset[actual_idx]
+
+        # Get preprocessed audio array - handle both formats
+        if "audio_array" in item:
+            # Preprocessed format: audio_array is already extracted
+            audio_array = np.array(item["audio_array"], dtype=np.float32)
+        elif (
+            "audio" in item
+            and isinstance(item["audio"], dict)
+            and "array" in item["audio"]
+        ):
+            # Original format: audio is nested under "audio" key
+            audio_array = np.array(item["audio"]["array"], dtype=np.float32)
+        else:
+            raise KeyError(
+                f"Could not find audio data in item. Expected 'audio_array' or 'audio.array'. Available keys: {list(item.keys())}"
+            )
+
+        # Apply telephony augmentation if requested for this sample
+        if augment_sample:
+            # Resample to 8kHz (assuming input is 16kHz)
+            audio_array = librosa.resample(audio_array, orig_sr=16000, target_sr=8000)
+            # Normalize to [-1, 1] for mu-law
+            audio_array = audio_array / (np.max(np.abs(audio_array)) + 1e-8)
+            # Apply μ-law compression
+            audio_array = librosa.mu_compress(audio_array, mu=255)
+
+        return {
+            "audio_array": audio_array,
+            "text": item.get(
+                "text", item.get("sentence", "")
+            ),  # Handle both preprocessed and Common Voice formats
+            "audio_path": item.get("audio_path", f"sample_{actual_idx}"),
+            "speaker_id": item.get("speaker_id", item.get("client_id", "unknown")),
+            "language": item.get("language", item.get("locale", "unknown")),
+        }
+
+
 class AudioTextDataset(Dataset):
     """
     General dataset wrapper for any audio-text datasets.
@@ -26,6 +105,7 @@ class AudioTextDataset(Dataset):
         audio_column: str = "audio",
         audio_array_key: str = "array",
         audio_sampling_rate_key: str = "sampling_rate",
+        augment: bool = False,
     ):
         """
         Args:
@@ -38,6 +118,7 @@ class AudioTextDataset(Dataset):
             audio_column: Name of audio column in dataset
             audio_array_key: Key for audio array within audio column (e.g., "array")
             audio_sampling_rate_key: Key for sampling rate within audio column
+            augment: Whether to apply telephony augmentation (8kHz resampling + μ-law)
         """
         self.dataset = hf_dataset[split] if split in hf_dataset else hf_dataset
         self.sampling_rate = sampling_rate
@@ -47,6 +128,7 @@ class AudioTextDataset(Dataset):
         self.audio_column = audio_column
         self.audio_array_key = audio_array_key
         self.audio_sampling_rate_key = audio_sampling_rate_key
+        self.augment = augment
 
         # Filter valid samples using dataset.map for parallel processing
         def check_valid(example):
@@ -76,19 +158,30 @@ class AudioTextDataset(Dataset):
             except Exception:
                 return {"valid": False}
 
-        # Use dataset.map with multiprocessing
         self.dataset = self.dataset.map(check_valid, num_proc=1)
         self.dataset = self.dataset.filter(lambda x: x["valid"], num_proc=1)
         self.dataset = self.dataset.remove_columns(["valid"])
 
-        print(f"Loaded {len(self.dataset)} valid samples")
+        self.original_length = len(self.dataset)
+        print(f"Loaded {self.original_length} valid samples")
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        if self.augment:
+            return 2 * self.original_length
+        return self.original_length
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Get a single data sample."""
-        item = self.dataset[idx]
+        if self.augment and idx >= self.original_length:
+            # Augmented sample
+            actual_idx = idx - self.original_length
+            augment_sample = True
+        else:
+            # Original sample
+            actual_idx = idx
+            augment_sample = False
+
+        item = self.dataset[actual_idx]
 
         try:
             # Extract audio
@@ -117,6 +210,17 @@ class AudioTextDataset(Dataset):
                     audio_array, orig_sr=source_sr, target_sr=self.sampling_rate
                 )
 
+            # Apply telephony augmentation if requested for this sample
+            if augment_sample:
+                # Resample to 8kHz
+                audio_array = librosa.resample(
+                    audio_array, orig_sr=self.sampling_rate, target_sr=8000
+                )
+                # Normalize to [-1, 1] for mu-law
+                audio_array = audio_array / (np.max(np.abs(audio_array)) + 1e-8)
+                # Apply μ-law compression
+                audio_array = librosa.mu_compress(audio_array, mu=255)
+
             # Truncate if too long (shouldn't happen due to filtering, but safety check)
             max_samples = int(self.max_audio_length * self.sampling_rate)
             if len(audio_array) > max_samples:
@@ -125,14 +229,16 @@ class AudioTextDataset(Dataset):
             return {
                 "audio_array": audio_array,
                 "text": item[self.text_column],
-                "audio_path": item.get("path", item.get("audio_path", f"sample_{idx}")),
+                "audio_path": item.get(
+                    "path", item.get("audio_path", f"sample_{actual_idx}")
+                ),
                 "speaker_id": item.get("speaker_id", item.get("client_id", "unknown")),
                 "language": item.get("language", item.get("locale", "unknown")),
             }
         except Exception as e:
             # If audio decoding fails, return a dummy sample or skip
             # For now, raise to avoid silent failures
-            raise RuntimeError(f"Failed to load audio for sample {idx}: {e}")
+            raise RuntimeError(f"Failed to load audio for sample {actual_idx}: {e}")
 
 
 class CommonVoiceDataset(Dataset):
@@ -253,6 +359,7 @@ class MultilingualAudioTextDataset(Dataset):
         audio_array_key: str = "array",
         audio_sampling_rate_key: str = "sampling_rate",
         language_weights: Optional[Dict[str, float]] = None,
+        augment: bool = False,
     ):
         """
         Args:
@@ -266,6 +373,7 @@ class MultilingualAudioTextDataset(Dataset):
             audio_array_key: Key for audio array within audio column
             audio_sampling_rate_key: Key for sampling rate within audio column
             language_weights: Optional weights for dataset sampling
+            augment: Whether to apply telephony augmentation
         """
         self.datasets = {}
         self.cumulative_sizes = []
@@ -284,6 +392,7 @@ class MultilingualAudioTextDataset(Dataset):
                 audio_column=audio_column,
                 audio_array_key=audio_array_key,
                 audio_sampling_rate_key=audio_sampling_rate_key,
+                augment=augment,
             )
 
             if len(dataset) > 0:
@@ -466,12 +575,60 @@ class TLECollator:
         }
 
 
+def create_preprocessed_data_loader(
+    dataset: HFDataset | DatasetDict | IterableDataset | IterableDatasetDict,
+    processor: WhisperProcessor,
+    tokenizer: Any,
+    split: str = "train",
+    batch_size: int = 8,
+    max_text_length: int = 256,
+    augment: bool = False,
+) -> DataLoader:
+    """
+    Convenience function to create a DataLoader for preprocessed audio-text training.
+
+    Args:
+        dataset: Preprocessed HF dataset with train/test splits
+        processor: Whisper processor for audio features
+        tokenizer: Text tokenizer
+        split: Dataset split ("train", "test")
+        batch_size: Training batch size
+        max_text_length: Maximum text sequence length
+        augment: Whether to apply telephony augmentation
+
+    Returns:
+        Configured DataLoader for TLE training
+    """
+    # Create preprocessed dataset
+    preprocessed_dataset = PreprocessedAudioTextDataset(
+        hf_dataset=dataset,
+        split=split,
+        augment=augment,
+    )
+
+    # Create collator
+    collator = TLECollator(
+        processor=processor, tokenizer=tokenizer, max_text_length=max_text_length
+    )
+
+    # Create data loader
+    return create_data_loader(
+        dataset=preprocessed_dataset,
+        collator=collator,
+        batch_size=batch_size,
+        shuffle=(split == "train"),  # Shuffle training data, not test
+        num_workers=0,
+        pin_memory=True,
+    )
+
+
 def create_data_loader(
     dataset: (
         AudioTextDataset
         | MultilingualAudioTextDataset
         | CommonVoiceDataset
         | MultilingualCommonVoiceDataset
+        | PreprocessedAudioTextDataset
     ),
     collator: TLECollator,
     batch_size: int = 8,
@@ -521,6 +678,7 @@ def create_tle_data_loader(
     audio_column: str = "audio",
     audio_array_key: str = "array",
     audio_sampling_rate_key: str = "sampling_rate",
+    augment: bool = False,
 ) -> DataLoader:
     """
     Convenience function to create a DataLoader for multilingual audio-text training.
@@ -543,6 +701,7 @@ def create_tle_data_loader(
         audio_column: Name of audio column in dataset (default: "audio")
         audio_array_key: Key for audio array within audio column (default: "array")
         audio_sampling_rate_key: Key for sampling rate within audio column (default: "sampling_rate")
+        augment: Whether to apply telephony augmentation
 
     Returns:
         Configured DataLoader for multilingual TLE training
@@ -558,6 +717,7 @@ def create_tle_data_loader(
         audio_column=audio_column,
         audio_array_key=audio_array_key,
         audio_sampling_rate_key=audio_sampling_rate_key,
+        augment=augment,
     )
 
     # Create collator
