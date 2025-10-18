@@ -7,7 +7,7 @@ import torch
 from typing import Optional, Tuple
 import lightning.pytorch as pl
 from lightning.pytorch import Trainer
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 import argparse
 import logging
@@ -286,6 +286,27 @@ def train_with_dataset(
         augment=augment,
     )
 
+    # Print training info
+    train_dataloader = data_module.train_dataloader()
+    steps_per_epoch = len(train_dataloader)
+    total_expected_steps = (
+        steps_per_epoch * max_epochs
+        if max_steps is None
+        else min(max_steps, steps_per_epoch * max_epochs)
+    )
+
+    print(f"Training setup:")
+    print(f"  Dataset: {len(data_module.dataset)} samples")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Steps per epoch: {steps_per_epoch}")
+    print(f"  Max epochs: {max_epochs}")
+    if max_steps is not None:
+        print(f"  Max steps: {max_steps} (limited training)")
+    print(f"  Total expected steps: {total_expected_steps}")
+    print(f"  Device: {device}")
+    print(f"  Learning rate: {learning_rate}")
+    print()
+
     # Model
     model = TLELightningModule(cfg, whisper_model, processor, tokenizer, learning_rate)
 
@@ -359,7 +380,7 @@ def train_with_preprocessed_dataset(
         device: Device to use for training
         train_split: Name of the training split
         test_split: Name of the test/validation split
-        subset: Dataset subset/configuration name (only used for HuggingFace datasets) (only used for HuggingFace datasets)
+        subset: Dataset subset/configuration name (only used for HuggingFace datasets)
         use_wandb: Enable Weights & Biases logging
         augment: Apply random audio augmentation
         precision: Mixed precision mode (auto, 32, 16, bf16)
@@ -419,6 +440,12 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Path to the preprocessed dataset (HuggingFace dataset name/URL or local directory path)",
+    )
+    parser.add_argument(
+        "--subset",
+        type=str,
+        default=None,
+        help="Dataset subset/configuration name (only used for HuggingFace datasets)",
     )
     parser.add_argument(
         "--train-split",
@@ -487,7 +514,6 @@ if __name__ == "__main__":
 
     # Auto-detect device if not specified
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-
     # Train
     trained_model = train_with_preprocessed_dataset(
         dataset_path=args.dataset,
