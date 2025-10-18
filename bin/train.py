@@ -126,31 +126,27 @@ class TLELightningModule(pl.LightningModule):
         lang_ids = batch["lang_ids"]
 
         # TLE forward
-        E_tilde, mu, logvar, length_pred = self.tle(
+        E_tilde, mu, logvar = self.tle(
             input_ids, attention_mask, target_T=T, lang_ids=lang_ids
         )
 
         # Get current beta for annealing
         beta = self.get_current_beta()
 
-        # Loss with free-bits and auxiliary length loss
-        loss, mse_loss, kl_loss, length_loss = vae_loss(
+        # Loss with free-bits
+        loss, mse_loss, kl_loss = vae_loss(
             E_tilde,
             E_teacher,
             mu,
             logvar,
             beta,
             self.cfg.free_bits_threshold,
-            length_pred=length_pred,
-            length_target=batch["lengths"],
-            length_loss_weight=self.cfg.length_loss_weight,
         )
 
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_beta", beta, prog_bar=True)
         self.log("train_mse_loss", mse_loss)
         self.log("train_kl_loss", kl_loss)
-        self.log("train_length_loss", length_loss)
         # Log learning rate
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("learning_rate", lr)
@@ -169,30 +165,26 @@ class TLELightningModule(pl.LightningModule):
         lang_ids = batch["lang_ids"]
 
         # TLE forward
-        E_tilde, mu, logvar, length_pred = self.tle(
+        E_tilde, mu, logvar = self.tle(
             input_ids, attention_mask, target_T=T, lang_ids=lang_ids
         )
 
         # Use final beta for validation
         beta = self.cfg.beta_end
 
-        # Loss with free-bits and auxiliary length loss
-        loss, mse_loss, kl_loss, length_loss = vae_loss(
+        # Loss with free-bits
+        loss, mse_loss, kl_loss = vae_loss(
             E_tilde,
             E_teacher,
             mu,
             logvar,
             beta,
             self.cfg.free_bits_threshold,
-            length_pred=length_pred,
-            length_target=batch["lengths"],
-            length_loss_weight=self.cfg.length_loss_weight,
         )
 
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_mse_loss", mse_loss)
         self.log("val_kl_loss", kl_loss)
-        self.log("val_length_loss", length_loss)
         return loss
 
     def configure_optimizers(self):

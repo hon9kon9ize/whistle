@@ -111,8 +111,6 @@ class TLEVAEConfig:
     # Teacher state augmentation parameters
     teacher_noise_std: float = 0.01  # Gaussian noise std for teacher states
     teacher_time_jitter_max: float = 0.1  # Max time stretch factor (±10%)
-    # Length prediction parameters
-    length_loss_weight: float = 0.1  # weight for auxiliary length loss
     # Performance optimization parameters
     gradient_checkpointing: bool = (
         True  # Enable gradient checkpointing for memory efficiency
@@ -169,10 +167,10 @@ class TLEVAE(nn.Module):
     """
     Text-to-Latent VAE that outputs pseudo Whisper encoder states.
     Training usage:
-      E_tilde, mu, logvar, length_pred = model(input_ids, attn_mask, target_T=E.size(1))
+      E_tilde, mu, logvar = model(input_ids, attn_mask, target_T=E.size(1))
       loss = mse(E_tilde, E) + beta * KL
     Inference (text-only):
-      E_tilde, _, _, _ = model(input_ids, attn_mask, target_T=pred_T or heuristic)
+      E_tilde, _, _ = model(input_ids, attn_mask, target_T=pred_T or heuristic)
     """
 
     def __init__(self, cfg: TLEVAEConfig):
@@ -186,8 +184,6 @@ class TLEVAE(nn.Module):
         # Global latent heads from pooled text features
         self.mu_head = nn.Linear(cfg.text_hidden, cfg.z_dim)
         self.logvar_head = nn.Linear(cfg.text_hidden, cfg.z_dim)
-        # Length prediction head for auxiliary loss
-        self.length_head = nn.Linear(cfg.text_hidden, 1)
 
         # Residual Conv stack over time with FiLM(z)
         self.pe = PositionalEncoding(cfg.whisper_hidden)
@@ -233,12 +229,11 @@ class TLEVAE(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         target_T: Optional[int] = None,
         lang_ids: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Returns: (E_tilde, mu, logvar, length_pred)
+        Returns: (E_tilde, mu, logvar)
           E_tilde: predicted encoder states (B, T, H)
           mu, logvar: latent parameters (B, z_dim)
-          length_pred: predicted sequence length (B,)
         """
         B, L = input_ids.shape
 
@@ -272,8 +267,6 @@ class TLEVAE(nn.Module):
         pooled = pooled / denom[:, None]  # (B, D_text)
         mu = self.mu_head(pooled)  # (B, z_dim)
         logvar = self.logvar_head(pooled)  # (B, z_dim)
-        # Length prediction for auxiliary loss
-        length_pred = self.length_head(pooled).squeeze(-1)  # (B,)
         z = self.reparameterize(mu, logvar)  # (B, z_dim)
 
         # 3) Seed time sequence by interpolating text→H to target_T
@@ -294,7 +287,7 @@ class TLEVAE(nn.Module):
 
         # 5) Final projection
         E_tilde = self.proj_out(x)  # (B, T, H)
-        return E_tilde, mu, logvar, length_pred
+        return E_tilde, mu, logvar
 
 
 # ---------------------------
@@ -307,12 +300,9 @@ def vae_loss(
     logvar: torch.Tensor,
     beta: float,
     free_bits_threshold: float = 0.0,
-    length_pred: Optional[torch.Tensor] = None,
-    length_target: Optional[torch.Tensor] = None,
-    length_loss_weight: float = 0.1,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) ) with optional free-bits + optional length loss
+    MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) ) with optional free-bits
 
     Args:
         E_tilde: predicted encoder states (B, T, H)
@@ -321,12 +311,9 @@ def vae_loss(
         logvar: latent log variance (B, z_dim)
         beta: KL weight coefficient
         free_bits_threshold: minimum KL per dimension to penalize (in nats)
-        length_pred: predicted sequence lengths (B,)
-        length_target: target sequence lengths (B,)
-        length_loss_weight: weight for auxiliary length loss
 
     Returns:
-        Tuple of (total_loss, mse_loss, kl_loss, length_loss)
+        Tuple of (total_loss, mse_loss, kl_loss)
     """
     mse = F.mse_loss(E_tilde, E_teacher)
 
@@ -343,11 +330,4 @@ def vae_loss(
 
     loss = mse + beta * kl
 
-    # Add auxiliary length loss if provided
-    length_loss = torch.tensor(0.0, device=E_tilde.device)
-    if length_pred is not None and length_target is not None:
-        # Use L1 loss for length prediction (more robust to outliers than MSE)
-        length_loss = F.l1_loss(length_pred, length_target.float())
-        loss = loss + length_loss_weight * length_loss
-
-    return loss, mse, kl, length_loss
+    return loss, mse, kl
