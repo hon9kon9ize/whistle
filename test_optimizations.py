@@ -3,7 +3,7 @@
 Test script for optimized TLE training
 
 This script demonstrates the performance improvements from:
-1. whisper-large-v2 for Cantonese support
+1. whisper-large-v3 for Cantonese support
 2. Multiprocessing data loading
 3. Large batch sizes (no gradient accumulation needed)
 
@@ -45,7 +45,7 @@ def main():
     print()
 
     print("Expected improvements:")
-    print("• whisper-large-v2: Best Cantonese support")
+    print("• whisper-large-v3: Best Cantonese support")
     print("• Multiprocessing: Faster data loading")
     print("• Large batch sizes: Better GPU utilization")
     print("• Overall: Should see >80% GPU utilization")

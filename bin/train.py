@@ -344,6 +344,8 @@ def train_with_dataset(
         # else use default (32-bit)
     elif precision == "bf16":
         trainer_kwargs["precision"] = "bf16-mixed"
+    elif precision == "bf16-mixed":
+        trainer_kwargs["precision"] = "bf16-mixed"
     elif precision == "16":
         trainer_kwargs["precision"] = "16-mixed"
     # precision == "32" uses default full precision
@@ -503,8 +505,8 @@ if __name__ == "__main__":
         "--precision",
         type=str,
         default="auto",
-        choices=["auto", "32", "16", "bf16"],
-        help="Precision for training (auto=detect best available, 32=full precision, 16=float16, bf16=bfloat16)",
+        choices=["auto", "32", "16", "bf16", "bf16-mixed"],
+        help="Precision for training (auto=detect best available, 32=full precision, 16=float16, bf16=bfloat16, bf16-mixed=bf16 mixed precision)",
     )
     parser.add_argument(
         "--learning-rate",
