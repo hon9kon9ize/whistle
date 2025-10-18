@@ -1,15 +1,14 @@
 from transformers import AutoTokenizer, WhisperProcessor, WhisperModel
 from whistle.tle.tle import TLEVAE, TLEVAEConfig, vae_loss
 from whistle.tle.utils import get_teacher_states, augment_teacher_states
-from whistle.tle.data import create_tle_data_loader, create_preprocessed_data_loader
-from datasets import load_dataset
+from whistle.tle.data import create_preprocessed_data_loader
+from datasets import load_dataset, load_from_disk
 import torch
 from typing import List, Optional, Tuple
 import lightning.pytorch as pl
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
-from torch.utils.data import DataLoader
 import argparse
 import logging
 
@@ -301,7 +300,7 @@ def train_with_preprocessed_dataset(
     Train TLE with a preprocessed dataset that has train/test splits.
 
     Args:
-        dataset_path: Path to the preprocessed dataset (HuggingFace dataset path or local path)
+        dataset_path: Path to the preprocessed dataset (HuggingFace dataset name/URL or local directory path)
         batch_size: Batch size for training
         max_epochs: Maximum number of epochs
         max_steps: Maximum number of training steps
@@ -309,7 +308,7 @@ def train_with_preprocessed_dataset(
         device: Device to use for training
         train_split: Name of the training split
         test_split: Name of the test/validation split
-        subset: Dataset subset/configuration name
+        subset: Dataset subset/configuration name (only used for HuggingFace datasets)
         use_wandb: Enable Weights & Biases logging
         augment: Apply random audio augmentation
         precision: Mixed precision mode (auto, 32, 16, bf16)
@@ -318,10 +317,17 @@ def train_with_preprocessed_dataset(
 
     # Load the preprocessed dataset
     try:
-        if subset is not None:
-            dataset = load_dataset(dataset_path, subset)
+        import os
+
+        if os.path.isdir(dataset_path):
+            # Load from local directory
+            dataset = load_from_disk(dataset_path)
         else:
-            dataset = load_dataset(dataset_path)
+            # Load from HuggingFace Hub or URL
+            if subset is not None:
+                dataset = load_dataset(dataset_path, subset)
+            else:
+                dataset = load_dataset(dataset_path)
     except Exception as e:
         logger.error(f"Failed to load dataset from {dataset_path}: {e}")
         raise
@@ -359,7 +365,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         required=True,
-        help="Path to the preprocessed dataset (HuggingFace dataset name or local path)",
+        help="Path to the preprocessed dataset (HuggingFace dataset name/URL or local directory path)",
     )
     parser.add_argument(
         "--train-split",
