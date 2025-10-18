@@ -86,6 +86,11 @@ class TLELightningModule(pl.LightningModule):
                 total_norm = total_norm ** (1.0 / 2)
                 self.log("grad_norm", total_norm)
 
+                # GRADIENT CLIPPING: Prevent exploding gradients
+                max_grad_norm = 1.0
+                torch.nn.utils.clip_grad_norm_(self.tle.parameters(), max_grad_norm)
+                self.log("grad_norm_clipped", min(total_norm, max_grad_norm))
+
     def get_current_beta(self) -> float:
         """Compute current beta value based on training step for annealing."""
         if not self.training:
@@ -102,6 +107,18 @@ class TLELightningModule(pl.LightningModule):
             beta = self.cfg.beta_end
 
         return beta
+
+    def get_learning_rate_multiplier(self) -> float:
+        """Compute learning rate multiplier based on beta annealing progress."""
+        if not self.training:
+            return 1.0  # no multiplier for validation
+
+        current_step = self.global_step
+        if current_step < self.cfg.beta_warmup_steps:
+            return 1.0  # full learning rate during warmup
+        else:
+            # Reduce learning rate by 50% after beta warmup to prevent instability
+            return 0.5
 
     def forward(self, input_ids, attention_mask=None, target_T=None):
         return self.tle(input_ids, attention_mask, target_T)
@@ -133,6 +150,9 @@ class TLELightningModule(pl.LightningModule):
         # Get current beta for annealing
         beta = self.get_current_beta()
 
+        # Get learning rate multiplier for stability after beta warmup
+        lr_multiplier = self.get_learning_rate_multiplier()
+
         # Loss with free-bits
         loss, mse_loss, kl_loss = vae_loss(
             E_tilde,
@@ -142,6 +162,9 @@ class TLELightningModule(pl.LightningModule):
             beta,
             self.cfg.free_bits_threshold,
         )
+
+        # Apply learning rate multiplier to loss for effective LR decay
+        loss = loss * lr_multiplier
 
         # Compute cosine similarity metric
         cos_sim = torch.nn.functional.cosine_similarity(
@@ -153,6 +176,14 @@ class TLELightningModule(pl.LightningModule):
         self.log("train_mse_loss", mse_loss)
         self.log("train_kl_loss", kl_loss)
         self.log("train_cos_sim", cos_sim)
+        self.log("train_lr_multiplier", lr_multiplier)
+
+        # KL explosion detection - log warning if KL loss gets too high
+        if kl_loss.item() > 10.0:  # KL loss > 10 nats per dimension is concerning
+            self.log("kl_explosion_warning", 1.0)
+            print(f"WARNING: High KL loss detected: {kl_loss.item():.2f}")
+        else:
+            self.log("kl_explosion_warning", 0.0)
         # Log learning rate
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("learning_rate", lr)

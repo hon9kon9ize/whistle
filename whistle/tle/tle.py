@@ -102,9 +102,11 @@ class TLEVAEConfig:
     # KL scheduling parameters
     beta_start: float = 0.1  # starting beta for annealing (higher for large batches)
     beta_end: float = 1.0  # final beta value
-    beta_warmup_steps: int = 500  # steps to anneal beta (shorter for large batches)
+    beta_warmup_steps: int = 1000  # steps to anneal beta
     # Free-bits parameters
-    free_bits_threshold: float = 0.5  # KL per dim threshold (in nats)
+    free_bits_threshold: float = (
+        1.0  # KL per dim threshold (in nats) - INCREASED from 0.5 to 1.0 for more stability
+    )
     # Language conditioning parameters
     num_languages: int = 3  # en, zh, yue
     lang_embed_dim: int = 32  # small language embedding dimension
