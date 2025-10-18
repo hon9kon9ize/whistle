@@ -26,8 +26,8 @@ def load_whisper_models(
     if not torch.cuda.is_available() and device == "cuda":
         device = "cpu"
 
-    # Use smaller Whisper model for faster teacher state extraction
-    whisper_model_name = "openai/whisper-base"  # Much faster than large-v3
+    # Use Whisper Large V3 for best Cantonese support
+    whisper_model_name = "openai/whisper-large-v3"  # Best Cantonese support
     print(f"Loading Whisper model: {whisper_model_name}")
 
     whisper_model = WhisperModel.from_pretrained(whisper_model_name)
@@ -242,6 +242,7 @@ class TLEDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             max_text_length=256,
             augment=self.augment,
+            num_workers=8,
         )
 
     def val_dataloader(self):
@@ -253,6 +254,7 @@ class TLEDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             max_text_length=256,
             augment=self.augment,
+            num_workers=8,
         )
 
 
@@ -305,6 +307,7 @@ def train_with_dataset(
     print(f"  Total expected steps: {total_expected_steps}")
     print(f"  Device: {device}")
     print(f"  Learning rate: {learning_rate}")
+    print(f"  Whisper model: whisper-large-v3 (best Cantonese support)")
     print()
 
     # Model

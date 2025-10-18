@@ -679,6 +679,7 @@ def create_preprocessed_data_loader(
     batch_size: int = 8,
     max_text_length: int = 256,
     augment: bool = False,
+    num_workers: int = 4,  # Enable multiprocessing by default
 ) -> DataLoader:
     """
     Convenience function to create a DataLoader for preprocessed audio-text training.
@@ -689,8 +690,9 @@ def create_preprocessed_data_loader(
         tokenizer: Text tokenizer
         split: Dataset split ("train", "test")
         batch_size: Training batch size
-    max_text_length: Maximum text sequence length
-    augment: Whether to apply random audio augmentation
+        max_text_length: Maximum text sequence length
+        augment: Whether to apply random audio augmentation
+        num_workers: Number of worker processes for data loading
 
     Returns:
         Configured DataLoader for TLE training
@@ -707,14 +709,16 @@ def create_preprocessed_data_loader(
         processor=processor, tokenizer=tokenizer, max_text_length=max_text_length
     )
 
-    # Create data loader
-    return create_data_loader(
-        dataset=preprocessed_dataset,
-        collator=collator,
+    # Create data loader with optimized settings
+    return DataLoader(
+        preprocessed_dataset,
         batch_size=batch_size,
         shuffle=(split == "train"),  # Shuffle training data, not test
-        num_workers=0,
+        num_workers=num_workers,
         pin_memory=True,
+        collate_fn=collator,
+        persistent_workers=(num_workers > 0),  # Keep workers alive between epochs
+        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch 2 batches per worker
     )
 
 
