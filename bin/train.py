@@ -143,10 +143,16 @@ class TLELightningModule(pl.LightningModule):
             self.cfg.free_bits_threshold,
         )
 
+        # Compute cosine similarity metric
+        cos_sim = torch.nn.functional.cosine_similarity(
+            E_tilde.flatten(1), E_teacher.flatten(1), dim=-1
+        ).mean()
+
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_beta", beta, prog_bar=True)
         self.log("train_mse_loss", mse_loss)
         self.log("train_kl_loss", kl_loss)
+        self.log("train_cos_sim", cos_sim)
         # Log learning rate
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("learning_rate", lr)
@@ -182,9 +188,15 @@ class TLELightningModule(pl.LightningModule):
             self.cfg.free_bits_threshold,
         )
 
+        # Compute cosine similarity metric
+        cos_sim = torch.nn.functional.cosine_similarity(
+            E_tilde.flatten(1), E_teacher.flatten(1), dim=-1
+        ).mean()
+
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_mse_loss", mse_loss)
         self.log("val_kl_loss", kl_loss)
+        self.log("val_cos_sim", cos_sim)
         return loss
 
     def configure_optimizers(self):
