@@ -100,9 +100,9 @@ class TLEVAEConfig:
     n_res_blocks: int = 6
     beta: float = 0.1  # KL weight
     # KL scheduling parameters
-    beta_start: float = 0.0  # starting beta for annealing
+    beta_start: float = 0.1  # starting beta for annealing (higher for large batches)
     beta_end: float = 1.0  # final beta value
-    beta_warmup_steps: int = 10000  # steps to anneal beta from start to end
+    beta_warmup_steps: int = 500  # steps to anneal beta (shorter for large batches)
     # Free-bits parameters
     free_bits_threshold: float = 0.5  # KL per dim threshold (in nats)
     # Language conditioning parameters
@@ -310,7 +310,7 @@ def vae_loss(
     length_pred: Optional[torch.Tensor] = None,
     length_target: Optional[torch.Tensor] = None,
     length_loss_weight: float = 0.1,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) ) with optional free-bits + optional length loss
 
@@ -324,6 +324,9 @@ def vae_loss(
         length_pred: predicted sequence lengths (B,)
         length_target: target sequence lengths (B,)
         length_loss_weight: weight for auxiliary length loss
+
+    Returns:
+        Tuple of (total_loss, mse_loss, kl_loss, length_loss)
     """
     mse = F.mse_loss(E_tilde, E_teacher)
 
@@ -341,9 +344,10 @@ def vae_loss(
     loss = mse + beta * kl
 
     # Add auxiliary length loss if provided
+    length_loss = torch.tensor(0.0, device=E_tilde.device)
     if length_pred is not None and length_target is not None:
         # Use L1 loss for length prediction (more robust to outliers than MSE)
         length_loss = F.l1_loss(length_pred, length_target.float())
         loss = loss + length_loss_weight * length_loss
 
-    return loss
+    return loss, mse, kl, length_loss

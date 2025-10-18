@@ -26,14 +26,18 @@ def load_whisper_models(
     if not torch.cuda.is_available() and device == "cuda":
         device = "cpu"
 
-    whisper_model = WhisperModel.from_pretrained("openai/whisper-large-v3")
+    # Use smaller Whisper model for faster teacher state extraction
+    whisper_model_name = "openai/whisper-base"  # Much faster than large-v3
+    print(f"Loading Whisper model: {whisper_model_name}")
+
+    whisper_model = WhisperModel.from_pretrained(whisper_model_name)
     whisper_model = whisper_model.to(device)
     whisper_model.eval()
     for param in whisper_model.parameters():
         param.requires_grad = False
 
-    processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-    tokenizer = AutoTokenizer.from_pretrained("openai/whisper-large-v3")
+    processor = WhisperProcessor.from_pretrained(whisper_model_name)
+    tokenizer = AutoTokenizer.from_pretrained(whisper_model_name)
 
     return whisper_model, processor, tokenizer
 
@@ -51,13 +55,36 @@ def create_tle_config(
 
 
 class TLELightningModule(pl.LightningModule):
-    def __init__(self, cfg: TLEVAEConfig, whisper_model, processor, tokenizer):
+    def __init__(
+        self,
+        cfg: TLEVAEConfig,
+        whisper_model,
+        processor,
+        tokenizer,
+        learning_rate: float = 1e-3,
+    ):
         super().__init__()
         self.cfg = cfg
         self.tle = TLEVAE(cfg)
         self.whisper = whisper_model
         self.processor = processor
         self.tokenizer = tokenizer
+        self.learning_rate = learning_rate
+
+    def on_after_backward(self):
+        """Compute and log gradient norm after backward pass."""
+        if self.training:
+            # Compute gradient norm across all parameters
+            total_norm = 0.0
+            param_count = 0
+            for p in self.tle.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+                    param_count += 1
+            if param_count > 0:
+                total_norm = total_norm ** (1.0 / 2)
+                self.log("grad_norm", total_norm)
 
     def get_current_beta(self) -> float:
         """Compute current beta value based on training step for annealing."""
@@ -107,7 +134,7 @@ class TLELightningModule(pl.LightningModule):
         beta = self.get_current_beta()
 
         # Loss with free-bits and auxiliary length loss
-        loss = vae_loss(
+        loss, mse_loss, kl_loss, length_loss = vae_loss(
             E_tilde,
             E_teacher,
             mu,
@@ -121,6 +148,12 @@ class TLELightningModule(pl.LightningModule):
 
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_beta", beta, prog_bar=True)
+        self.log("train_mse_loss", mse_loss)
+        self.log("train_kl_loss", kl_loss)
+        self.log("train_length_loss", length_loss)
+        # Log learning rate
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("learning_rate", lr)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -144,7 +177,7 @@ class TLELightningModule(pl.LightningModule):
         beta = self.cfg.beta_end
 
         # Loss with free-bits and auxiliary length loss
-        loss = vae_loss(
+        loss, mse_loss, kl_loss, length_loss = vae_loss(
             E_tilde,
             E_teacher,
             mu,
@@ -157,11 +190,27 @@ class TLELightningModule(pl.LightningModule):
         )
 
         self.log("val_loss", loss, prog_bar=True)
+        self.log("val_mse_loss", mse_loss)
+        self.log("val_kl_loss", kl_loss)
+        self.log("val_length_loss", length_loss)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.tle.parameters(), lr=2e-4, weight_decay=0.01)
-        return optimizer
+        optimizer = torch.optim.AdamW(
+            self.tle.parameters(), lr=self.learning_rate, weight_decay=0.01
+        )
+        # Add learning rate scheduler
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=5000, T_mult=2, eta_min=1e-5
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
 
 
 class TLEDataModule(pl.LightningDataModule):
@@ -219,6 +268,7 @@ def train_with_dataset(
     use_wandb: bool = False,
     augment: bool = False,
     precision: str = "auto",
+    learning_rate: float = 1e-3,
 ):
     """Train TLE with provided dataset that has train/test splits."""
     # Load models
@@ -237,7 +287,7 @@ def train_with_dataset(
     )
 
     # Model
-    model = TLELightningModule(cfg, whisper_model, processor, tokenizer)
+    model = TLELightningModule(cfg, whisper_model, processor, tokenizer, learning_rate)
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -295,6 +345,7 @@ def train_with_preprocessed_dataset(
     use_wandb: bool = False,
     augment: bool = False,
     precision: str = "auto",
+    learning_rate: float = 1e-3,
 ):
     """
     Train TLE with a preprocessed dataset that has train/test splits.
@@ -312,6 +363,7 @@ def train_with_preprocessed_dataset(
         use_wandb: Enable Weights & Biases logging
         augment: Apply random audio augmentation
         precision: Mixed precision mode (auto, 32, 16, bf16)
+        learning_rate: Learning rate for training
     """
     print(f"Loading preprocessed dataset from: {dataset_path}")
 
@@ -354,6 +406,7 @@ def train_with_preprocessed_dataset(
         use_wandb=use_wandb,
         augment=augment,
         precision=precision,
+        learning_rate=learning_rate,
     )
 
 
@@ -424,10 +477,10 @@ if __name__ == "__main__":
         help="Precision for training (auto=detect best available, 32=full precision, 16=float16, bf16=bfloat16)",
     )
     parser.add_argument(
-        "--subset",
-        type=str,
-        default=None,
-        help="Dataset subset/configuration name (for datasets with multiple subsets)",
+        "--learning-rate",
+        type=float,
+        default=1e-3,
+        help="Learning rate for training (default: 1e-3)",
     )
 
     args = parser.parse_args()
@@ -449,4 +502,5 @@ if __name__ == "__main__":
         use_wandb=args.use_wandb,
         augment=args.augment,
         precision=args.precision,
+        learning_rate=args.learning_rate,
     )
