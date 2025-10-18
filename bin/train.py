@@ -4,7 +4,7 @@ from whistle.tle.utils import get_teacher_states, augment_teacher_states
 from whistle.tle.data import create_preprocessed_data_loader
 from datasets import load_dataset, load_from_disk
 import torch
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 import lightning.pytorch as pl
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -172,7 +172,7 @@ class TLEDataModule(pl.LightningDataModule):
         tokenizer=None,
         batch_size: int = 8,
         train_split: str = "train",
-        test_split: str = "test",
+        test_split: str = "valid",
         augment: bool = False,
     ):
         super().__init__()
@@ -290,7 +290,7 @@ def train_with_preprocessed_dataset(
     save_every: int = 1000,
     device: str = "cuda",
     train_split: str = "train",
-    test_split: str = "test",
+    test_split: str = "valid",
     subset: Optional[str] = None,
     use_wandb: bool = False,
     augment: bool = False,
@@ -308,7 +308,7 @@ def train_with_preprocessed_dataset(
         device: Device to use for training
         train_split: Name of the training split
         test_split: Name of the test/validation split
-        subset: Dataset subset/configuration name (only used for HuggingFace datasets)
+        subset: Dataset subset/configuration name (only used for HuggingFace datasets) (only used for HuggingFace datasets)
         use_wandb: Enable Weights & Biases logging
         augment: Apply random audio augmentation
         precision: Mixed precision mode (auto, 32, 16, bf16)
@@ -376,8 +376,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test-split",
         type=str,
-        default="test",
-        help="Name of the test/validation split (default: test)",
+        default="valid",
+        help="Name of the test/validation split (default: valid)",
     )
     parser.add_argument(
         "--batch-size", type=int, default=4, help="Batch size for training (default: 4)"
