@@ -52,8 +52,8 @@ class ResidualConv1dFiLM(nn.Module):
         y = self.norm1(y)
         gamma, beta = self.film1(z).chunk(2, dim=-1)  # (B, H), (B, H)
         # Clamp FiLM modulation to prevent explosion
-        gamma = torch.tanh(gamma) * 0.3  # Scale tanh to [-0.3, 0.3]
-        beta = torch.tanh(beta) * 0.3
+        gamma = torch.tanh(gamma) * 0.1  # Reduced from 0.3 to 0.1
+        beta = torch.tanh(beta) * 0.1  # Reduced from 0.3 to 0.1
         y = y * (1 + gamma[:, None, :]) + beta[:, None, :]
         y = F.gelu(y)
         y = y.transpose(1, 2)  # (B, H, T) for next conv
@@ -64,13 +64,13 @@ class ResidualConv1dFiLM(nn.Module):
         y = self.norm2(y)
         gamma2, beta2 = self.film2(z).chunk(2, dim=-1)
         # Clamp FiLM modulation to prevent explosion
-        gamma2 = torch.tanh(gamma2) * 0.3  # Scale tanh to [-0.3, 0.3]
-        beta2 = torch.tanh(beta2) * 0.3
+        gamma2 = torch.tanh(gamma2) * 0.1  # Reduced from 0.3 to 0.1
+        beta2 = torch.tanh(beta2) * 0.1  # Reduced from 0.3 to 0.1
         y = y * (1 + gamma2[:, None, :]) + beta2[:, None, :]
         y = F.gelu(y)
 
-        # Residual connection (both in (B, T, H))
-        return x_tbh + y
+        # Residual connection (both in (B, T, H)) with scaling
+        return x_tbh + 0.1 * y  # Scale residual by 0.1 to match Whisper scale
 
 
 class PositionalEncoding(nn.Module):
@@ -103,7 +103,7 @@ class TLEVAEConfig:
     n_text_heads: int = 8
     whisper_hidden: int = 1280  # H for whisper-large-v3 encoder
     z_dim: int = 256  # global latent
-    n_res_blocks: int = 6
+    n_res_blocks: int = 3  # Reduced to match paper: 3-layer conv encoder
     beta: float = 0.1  # KL weight
     # KL scheduling parameters
     beta_start: float = (
@@ -209,6 +209,31 @@ class TLEVAE(nn.Module):
             cfg.whisper_hidden, cfg.whisper_hidden
         )  # final projection
 
+        # Initialize weights properly
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Initialize model weights to match Whisper's scale (default PyTorch init)."""
+        if isinstance(module, nn.Linear):
+            # Use default PyTorch Linear initialization (not Xavier)
+            # This gives std ≈ 0.016 for 1280-dim layers, closer to Whisper's 0.013-0.024
+            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            if module.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(module.bias, -bound, bound)
+        elif isinstance(module, nn.Conv1d):
+            # Use default PyTorch Conv1d initialization
+            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            if module.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(module.bias, -bound, bound)
+        elif isinstance(module, nn.LayerNorm):
+            # LayerNorm initialization
+            nn.init.constant_(module.bias, 0)
+            nn.init.constant_(module.weight, 1.0)
+
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         # Clamp logvar for numerical stability AND variance preservation
         # Changed from [-5, 5] to [-3, 2] to:
@@ -301,7 +326,7 @@ class TLEVAE(nn.Module):
             else:
                 x = block(x, z)  # (B, T, H)
 
-        # 5) Final projection
+        # 5) Final projection (no LayerNorm - Whisper encoder outputs are not normalized)
         E_tilde = self.proj_out(x)  # (B, T, H)
         return E_tilde, mu, logvar
 
