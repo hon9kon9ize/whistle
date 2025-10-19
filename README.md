@@ -163,6 +163,42 @@ The script automatically loads Whisper models, creates the TLE configuration, an
 
 After training the TLE model, you can fine-tune the Whisper decoder using text-only data by replacing the speech encoder with TLE-generated pseudo encoder states.
 
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│          TLE Training Architecture                 │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  Training Data (Audio)                              │
+│       ↓                                             │
+│  ┌──────────────────────────────────────────────┐  │
+│  │  Whisper Encoder (FROZEN ❄️)                  │  │
+│  │  - requires_grad = False                     │  │
+│  │  - eval() mode                               │  │
+│  │  - no_grad() context                         │  │
+│  └──────────────────────────────────────────────┘  │
+│       ↓                                             │
+│   E_teacher (detached targets)                      │
+│       ↓                                             │
+│  Text Input + E_teacher                             │
+│       ↓                                             │
+│  ┌──────────────────────────────────────────────┐  │
+│  │  TLE Model (TRAINABLE 🔥)                    │  │
+│  │  - Text Encoder                              │  │
+│  │  - VAE Decoder                               │  │
+│  │  - Optimizer only includes these params      │  │
+│  └──────────────────────────────────────────────┘  │
+│       ↓                                             │
+│   E_tilde (predictions)                             │
+│       ↓                                             │
+│   Loss = MSE(E_tilde, E_teacher) + β*KL            │
+│       ↓ (backprop only through TLE)                 │
+│   Gradient Update                                   │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
 ### Phase 2: Text-Only Decoder Fine-Tuning
 
 ```bash
@@ -210,7 +246,7 @@ The paper reports that TLE provides effective domain adaptation for speech recog
 
 ---
 
-## � Roadmap
+## 🗺️ Roadmap
 
 ### ✅ Implemented Features
 

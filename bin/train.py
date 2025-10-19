@@ -375,25 +375,62 @@ def train_with_dataset(
     model = TLELightningModule(cfg, whisper_model, processor, tokenizer, learning_rate)
 
     # Callbacks
-    # Custom checkpoint callback that saves only model weights (not optimizer state)
-    # This reduces checkpoint size from ~1.6GB to ~500MB by skipping optimizer momentum/variance
-    class ModelOnlyCheckpoint(ModelCheckpoint):
+    # Custom checkpoint callback that saves TLE model + optimizer state, but excludes Whisper weights
+    # This keeps optimizer state for training resumption, but removes Whisper to save ~2GB
+    class TLEOnlyCheckpoint(ModelCheckpoint):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             logger.info(
-                "Using ModelOnlyCheckpoint: saving model weights only (no optimizer state)"
+                "Using TLEOnlyCheckpoint: saving TLE model + optimizer state (excluding Whisper weights)"
             )
 
         def _save_checkpoint(self, trainer, filepath: str) -> None:
-            # Save only the model state_dict, not the full Lightning checkpoint
-            # This skips optimizer states which can be ~1GB
-            model = trainer.lightning_module
-            torch.save(model.tle.state_dict(), filepath)
+            # First save the full checkpoint normally using parent class
+            super()._save_checkpoint(trainer, filepath)
+
+            # Then load and filter it to remove Whisper weights
+            ckpt = torch.load(filepath, map_location="cpu")
+
+            if "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+
+                # Filter to remove Whisper, processor, tokenizer
+                filtered_state_dict = {}
+                whisper_params_removed = 0
+
+                for key, value in state_dict.items():
+                    # Explicitly exclude Whisper, processor, tokenizer
+                    if (
+                        key.startswith("whisper.")
+                        or key.startswith("processor.")
+                        or key.startswith("tokenizer.")
+                    ):
+                        whisper_params_removed += 1
+                        continue
+
+                    # Keep everything else (TLE model + optimizer states)
+                    filtered_state_dict[key] = value
+
+                if whisper_params_removed > 0:
+                    logger.info(
+                        f"Removed {whisper_params_removed} Whisper/processor/tokenizer parameters from checkpoint"
+                    )
+
+                # Replace state_dict with filtered version
+                ckpt["state_dict"] = filtered_state_dict
+
+            # Save the modified checkpoint with optimizer states intact
+            torch.save(ckpt, filepath)
+
+            import os
+
+            ckpt_size_gb = os.path.getsize(filepath) / 1e9
             logger.info(
-                f"Saved model checkpoint to {filepath} (~500MB, no optimizer state)"
+                f"Saved checkpoint to {filepath} ({ckpt_size_gb:.2f}GB, "
+                f"with optimizer state for training resumption, Whisper weights excluded)"
             )
 
-    checkpoint_callback = ModelOnlyCheckpoint(
+    checkpoint_callback = TLEOnlyCheckpoint(
         dirpath="checkpoints",
         filename="tle-{epoch:02d}-{step:06d}.pt",
         save_top_k=-1,

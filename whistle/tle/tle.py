@@ -51,6 +51,9 @@ class ResidualConv1dFiLM(nn.Module):
         y = y.transpose(1, 2)  # (B, T, H) for norm + FiLM
         y = self.norm1(y)
         gamma, beta = self.film1(z).chunk(2, dim=-1)  # (B, H), (B, H)
+        # Clamp FiLM modulation to prevent explosion
+        gamma = torch.tanh(gamma) * 0.3  # Scale tanh to [-0.3, 0.3]
+        beta = torch.tanh(beta) * 0.3
         y = y * (1 + gamma[:, None, :]) + beta[:, None, :]
         y = F.gelu(y)
         y = y.transpose(1, 2)  # (B, H, T) for next conv
@@ -60,6 +63,9 @@ class ResidualConv1dFiLM(nn.Module):
         y = y.transpose(1, 2)  # (B, T, H) for norm + FiLM
         y = self.norm2(y)
         gamma2, beta2 = self.film2(z).chunk(2, dim=-1)
+        # Clamp FiLM modulation to prevent explosion
+        gamma2 = torch.tanh(gamma2) * 0.3  # Scale tanh to [-0.3, 0.3]
+        beta2 = torch.tanh(beta2) * 0.3
         y = y * (1 + gamma2[:, None, :]) + beta2[:, None, :]
         y = F.gelu(y)
 
@@ -100,12 +106,16 @@ class TLEVAEConfig:
     n_res_blocks: int = 6
     beta: float = 0.1  # KL weight
     # KL scheduling parameters
-    beta_start: float = 0.1  # starting beta for annealing (higher for large batches)
-    beta_end: float = 1.0  # final beta value
-    beta_warmup_steps: int = 1000  # steps to anneal beta
+    beta_start: float = (
+        1.0  # starting beta for annealing (increased for better KL learning)
+    )
+    beta_end: float = 10.0  # final beta value (increased to enforce latent learning)
+    beta_warmup_steps: int = (
+        5000  # steps to anneal beta (increased for smoother transition)
+    )
     # Free-bits parameters
     free_bits_threshold: float = (
-        1.0  # KL per dim threshold (in nats) - INCREASED from 0.5 to 1.0 for more stability
+        0.01  # KL per dim threshold (in nats) - REDUCED from 1.0 to 0.01 to prevent posterior collapse
     )
     # Language conditioning parameters
     num_languages: int = 3  # en, zh, yue
@@ -200,8 +210,12 @@ class TLEVAE(nn.Module):
         )  # final projection
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        # Clamp logvar for numerical stability
-        logvar = torch.clamp(logvar, min=-10, max=10)
+        # Clamp logvar for numerical stability AND variance preservation
+        # Changed from [-5, 5] to [-3, 2] to:
+        # - Prevent variance collapse (exp(logvar) was ~0.27, target > 0.5)
+        # - Maintain numerical stability (still prevents NaN/explosion)
+        # - Allow posterior to remain informative
+        logvar = torch.clamp(logvar, min=-3, max=2)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
