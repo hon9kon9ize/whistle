@@ -258,6 +258,7 @@ class TLEDataModule(pl.LightningDataModule):
         train_split: str = "train",
         test_split: str = "valid",
         augment: bool = False,
+        val_samples: Optional[int] = None,
     ):
         super().__init__()
         self.dataset = dataset
@@ -267,6 +268,7 @@ class TLEDataModule(pl.LightningDataModule):
         self.train_split = train_split
         self.test_split = test_split
         self.augment = augment
+        self.val_samples = val_samples
 
     def train_dataloader(self):
         return create_preprocessed_data_loader(
@@ -281,8 +283,30 @@ class TLEDataModule(pl.LightningDataModule):
         )
 
     def val_dataloader(self):
+        dataset = self.dataset
+
+        # Limit validation set to val_samples if specified
+        if self.val_samples is not None:
+            # Create a subset of the validation split
+            import random
+
+            val_split = dataset[self.test_split]
+            total_samples = len(val_split)
+
+            if total_samples > self.val_samples:
+                # Randomly select val_samples indices
+                selected_indices = random.sample(range(total_samples), self.val_samples)
+                selected_indices.sort()  # Sort for better cache locality
+                val_split = val_split.select(selected_indices)
+
+                # Create a temporary dataset dict with the subset
+                dataset = {self.test_split: val_split}
+                logger.info(
+                    f"Validation set limited to {self.val_samples} samples (from {total_samples})"
+                )
+
         return create_preprocessed_data_loader(
-            dataset=self.dataset,
+            dataset=dataset,
             processor=self.processor,
             tokenizer=self.tokenizer,
             split=self.test_split,
@@ -302,6 +326,7 @@ def train_with_dataset(
     device: str = "cuda",
     train_split: str = "train",
     test_split: str = "test",
+    val_samples: Optional[int] = None,
     use_wandb: bool = False,
     augment: bool = False,
     precision: str = "auto",
@@ -321,6 +346,7 @@ def train_with_dataset(
         train_split=train_split,
         test_split=test_split,
         augment=augment,
+        val_samples=val_samples,
     )
 
     # Print training info
@@ -349,9 +375,27 @@ def train_with_dataset(
     model = TLELightningModule(cfg, whisper_model, processor, tokenizer, learning_rate)
 
     # Callbacks
-    checkpoint_callback = ModelCheckpoint(
+    # Custom checkpoint callback that saves only model weights (not optimizer state)
+    # This reduces checkpoint size from ~1.6GB to ~500MB by skipping optimizer momentum/variance
+    class ModelOnlyCheckpoint(ModelCheckpoint):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            logger.info(
+                "Using ModelOnlyCheckpoint: saving model weights only (no optimizer state)"
+            )
+
+        def _save_checkpoint(self, trainer, filepath: str) -> None:
+            # Save only the model state_dict, not the full Lightning checkpoint
+            # This skips optimizer states which can be ~1GB
+            model = trainer.lightning_module
+            torch.save(model.tle.state_dict(), filepath)
+            logger.info(
+                f"Saved model checkpoint to {filepath} (~500MB, no optimizer state)"
+            )
+
+    checkpoint_callback = ModelOnlyCheckpoint(
         dirpath="checkpoints",
-        filename="tle-{epoch:02d}-{step:06d}",
+        filename="tle-{epoch:02d}-{step:06d}.pt",
         save_top_k=-1,
         every_n_train_steps=save_every,
     )
@@ -403,6 +447,7 @@ def train_with_preprocessed_dataset(
     train_split: str = "train",
     test_split: str = "valid",
     subset: Optional[str] = None,
+    val_samples: Optional[int] = None,
     use_wandb: bool = False,
     augment: bool = False,
     precision: str = "auto",
@@ -421,6 +466,7 @@ def train_with_preprocessed_dataset(
         train_split: Name of the training split
         test_split: Name of the test/validation split
         subset: Dataset subset/configuration name (only used for HuggingFace datasets)
+        val_samples: Limit validation to N random samples (e.g., 1000 for faster validation)
         use_wandb: Enable Weights & Biases logging
         augment: Apply random audio augmentation
         precision: Mixed precision mode (auto, 32, 16, bf16)
@@ -464,6 +510,7 @@ def train_with_preprocessed_dataset(
         device=device,
         train_split=train_split,
         test_split=test_split,
+        val_samples=val_samples,
         use_wandb=use_wandb,
         augment=augment,
         precision=precision,
@@ -549,6 +596,12 @@ if __name__ == "__main__":
         default=1e-3,
         help="Learning rate for training (default: 1e-3)",
     )
+    parser.add_argument(
+        "--val-samples",
+        type=int,
+        default=None,
+        help="Limit validation set to N random samples for faster validation (e.g., 1000). Default: None (use full validation set)",
+    )
 
     args = parser.parse_args()
 
@@ -565,6 +618,7 @@ if __name__ == "__main__":
         train_split=args.train_split,
         test_split=args.test_split,
         subset=args.subset,
+        val_samples=args.val_samples,
         use_wandb=args.use_wandb,
         augment=args.augment,
         precision=args.precision,
