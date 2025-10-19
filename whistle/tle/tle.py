@@ -69,8 +69,8 @@ class ResidualConv1dFiLM(nn.Module):
         y = y * (1 + gamma2[:, None, :]) + beta2[:, None, :]
         y = F.gelu(y)
 
-        # Residual connection (both in (B, T, H)) with scaling
-        return x_tbh + 0.1 * y  # Scale residual by 0.1 to match Whisper scale
+        # Residual connection (both in (B, T, H))
+        return x_tbh + y
 
 
 class PositionalEncoding(nn.Module):
@@ -209,6 +209,10 @@ class TLEVAE(nn.Module):
             cfg.whisper_hidden, cfg.whisper_hidden
         )  # final projection
 
+        # Learnable affine calibrator to match Whisper encoder output scale precisely
+        self.out_scale = nn.Parameter(torch.ones(cfg.whisper_hidden))  # γ (scale)
+        self.out_shift = nn.Parameter(torch.zeros(cfg.whisper_hidden))  # β (shift)
+
         # Initialize weights properly
         self.apply(self._init_weights)
 
@@ -326,8 +330,11 @@ class TLEVAE(nn.Module):
             else:
                 x = block(x, z)  # (B, T, H)
 
-        # 5) Final projection (no LayerNorm - Whisper encoder outputs are not normalized)
+        # 5) Final projection + learnable affine calibration to match Whisper scale
         E_tilde = self.proj_out(x)  # (B, T, H)
+        E_tilde = (
+            E_tilde * self.out_scale + self.out_shift
+        )  # Learnable scale/shift calibration
         return E_tilde, mu, logvar
 
 
