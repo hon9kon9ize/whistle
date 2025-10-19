@@ -4,6 +4,7 @@ from whistle.tle.utils import get_teacher_states, augment_teacher_states
 from whistle.tle.data import create_preprocessed_data_loader
 from datasets import load_dataset, load_from_disk
 import torch
+import torch.nn.functional as F
 from typing import Optional, Tuple
 import lightning.pytorch as pl
 from lightning.pytorch import Trainer
@@ -70,6 +71,68 @@ class TLELightningModule(pl.LightningModule):
         self.processor = processor
         self.tokenizer = tokenizer
         self.learning_rate = learning_rate
+        
+        # Cache for validation teacher states to avoid repeated Whisper inference
+        self.validation_cache = {}
+        self.cache_enabled = True
+
+    def get_cached_teacher_states(self, audio_arrays, batch_cache_keys):
+        """Get teacher states with caching for validation performance."""
+        if not self.cache_enabled:
+            # Fallback to direct computation
+            return get_teacher_states(audio_arrays, self.whisper, self.processor)
+        
+        # Check cache first
+        cached_states = []
+        uncached_indices = []
+        uncached_audio = []
+        
+        for i, cache_key in enumerate(batch_cache_keys):
+            if cache_key in self.validation_cache:
+                cached_states.append(self.validation_cache[cache_key])
+            else:
+                cached_states.append(None)  # Placeholder
+                uncached_indices.append(i)
+                uncached_audio.append(audio_arrays[i])
+        
+        # Compute missing teacher states
+        if uncached_audio:
+            new_states = get_teacher_states(uncached_audio, self.whisper, self.processor)
+            # Cache them
+            for idx, state in zip(uncached_indices, new_states):
+                cache_key = batch_cache_keys[idx]
+                self.validation_cache[cache_key] = state
+            
+            # Log cache misses (only occasionally to avoid spam)
+            if len(self.validation_cache) % 100 == 0:
+                print(f"Validation cache: {len(self.validation_cache)} total entries, "
+                      f"computed {len(uncached_audio)} new states this batch")
+        
+        # Reconstruct batch in correct order
+        final_states = []
+        for i, state in enumerate(cached_states):
+            if state is not None:
+                final_states.append(state)
+            else:
+                # Find the computed state for this index
+                uncached_pos = uncached_indices.index(i)
+                final_states.append(new_states[uncached_pos])
+        
+        return torch.stack(final_states)
+
+    def clear_validation_cache(self):
+        """Clear the validation cache to free memory."""
+        cache_size = len(self.validation_cache)
+        self.validation_cache.clear()
+        print(f"Cleared validation cache ({cache_size} entries)")
+
+    def enable_cache(self, enabled: bool = True):
+        """Enable or disable validation caching."""
+        self.cache_enabled = enabled
+        if enabled:
+            print("Validation teacher state caching enabled")
+        else:
+            print("Validation teacher state caching disabled")
 
     def on_after_backward(self):
         """Compute and log gradient norm after backward pass."""
@@ -137,6 +200,13 @@ class TLELightningModule(pl.LightningModule):
             time_jitter_max=self.cfg.teacher_time_jitter_max,
         )
 
+        # Create audio attention mask based on actual lengths
+        lengths = batch["lengths"]  # (B,) - approximate valid lengths
+        audio_attention_mask = torch.zeros(len(lengths), T, dtype=torch.bool)
+        for i, length in enumerate(lengths):
+            valid_len = min(length.item(), T)  # Clip to actual T
+            audio_attention_mask[i, :valid_len] = True
+
         # Text tokens and language IDs
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
@@ -153,22 +223,36 @@ class TLELightningModule(pl.LightningModule):
         # Get learning rate multiplier for stability after beta warmup
         lr_multiplier = self.get_learning_rate_multiplier()
 
-        # Loss with free-bits
-        loss, mse_loss, kl_loss = vae_loss(
-            E_tilde,
-            E_teacher,
-            mu,
-            logvar,
-            beta,
-            self.cfg.free_bits_threshold,
-        )
+        # Apply masking to valid (non-padded) positions
+        if audio_attention_mask is not None:
+            # Flatten and select valid positions
+            valid_mask = audio_attention_mask.flatten()  # (B*T,)
+            E_teacher_flat = E_teacher.flatten(0, 1)  # (B*T, D)
+            E_teacher_valid = E_teacher_flat[valid_mask.bool()]  # (N_valid, D)
+            E_tilde_flat = E_tilde.flatten(0, 1)  # (B*T, D)
+            E_tilde_valid = E_tilde_flat[valid_mask.bool()]  # (N_valid, D)
+        else:
+            E_teacher_valid = E_teacher.flatten(0, 1)
+            E_tilde_valid = E_tilde.flatten(0, 1)
+
+        # Compute MSE loss on valid embeddings
+        mse_loss = F.mse_loss(E_tilde_valid, E_teacher_valid)
+
+        # Compute KL loss (per sequence, no masking needed)
+        kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (B, z_dim)
+        if self.cfg.free_bits_threshold > 0:
+            kl_per_dim = torch.clamp(kl_per_dim - self.cfg.free_bits_threshold, min=0)
+        kl_loss = kl_per_dim.mean()
+
+        # Total loss
+        loss = mse_loss + beta * kl_loss
 
         # Apply learning rate multiplier to loss for effective LR decay
         loss = loss * lr_multiplier
 
-        # Compute cosine similarity metric
+        # Compute cosine similarity metric (use valid embeddings)
         cos_sim = torch.nn.functional.cosine_similarity(
-            E_tilde.flatten(1), E_teacher.flatten(1), dim=-1
+            E_tilde_valid, E_teacher_valid, dim=-1
         ).mean()
 
         self.log("train_loss", loss, prog_bar=True)
@@ -190,11 +274,20 @@ class TLELightningModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        # Get teacher states
-        E_teacher = get_teacher_states(
-            batch["audio_arrays"], self.whisper, self.processor
-        )
+        # Create cache keys for this batch (use audio content hash or index-based)
+        # For simplicity, use batch_idx and sample indices within batch
+        batch_cache_keys = [f"val_{batch_idx}_{i}" for i in range(len(batch["audio_arrays"]))]
+        
+        # Get teacher states (with caching)
+        E_teacher = self.get_cached_teacher_states(batch["audio_arrays"], batch_cache_keys)
         _, T, _ = E_teacher.shape
+
+        # Create audio attention mask based on actual lengths
+        lengths = batch["lengths"]  # (B,) - approximate valid lengths
+        audio_attention_mask = torch.zeros(len(lengths), T, dtype=torch.bool)
+        for i, length in enumerate(lengths):
+            valid_len = min(length.item(), T)  # Clip to actual T
+            audio_attention_mask[i, :valid_len] = True
 
         # Text tokens and language IDs
         input_ids = batch["input_ids"]
@@ -209,19 +302,33 @@ class TLELightningModule(pl.LightningModule):
         # Use final beta for validation
         beta = self.cfg.beta_end
 
-        # Loss with free-bits
-        loss, mse_loss, kl_loss = vae_loss(
-            E_tilde,
-            E_teacher,
-            mu,
-            logvar,
-            beta,
-            self.cfg.free_bits_threshold,
-        )
+        # Apply masking to valid (non-padded) positions
+        if audio_attention_mask is not None:
+            # Flatten and select valid positions
+            valid_mask = audio_attention_mask.flatten()  # (B*T,)
+            E_teacher_flat = E_teacher.flatten(0, 1)  # (B*T, D)
+            E_teacher_valid = E_teacher_flat[valid_mask.bool()]  # (N_valid, D)
+            E_tilde_flat = E_tilde.flatten(0, 1)  # (B*T, D)
+            E_tilde_valid = E_tilde_flat[valid_mask.bool()]  # (N_valid, D)
+        else:
+            E_teacher_valid = E_teacher.flatten(0, 1)
+            E_tilde_valid = E_tilde.flatten(0, 1)
 
-        # Compute cosine similarity metric
+        # Compute MSE loss on valid embeddings
+        mse_loss = F.mse_loss(E_tilde_valid, E_teacher_valid)
+
+        # Compute KL loss (per sequence, no masking needed)
+        kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (B, z_dim)
+        if self.cfg.free_bits_threshold > 0:
+            kl_per_dim = torch.clamp(kl_per_dim - self.cfg.free_bits_threshold, min=0)
+        kl_loss = kl_per_dim.mean()
+
+        # Total loss
+        loss = mse_loss + beta * kl_loss
+
+        # Compute cosine similarity metric (use valid embeddings)
         cos_sim = torch.nn.functional.cosine_similarity(
-            E_tilde.flatten(1), E_teacher.flatten(1), dim=-1
+            E_tilde_valid, E_teacher_valid, dim=-1
         ).mean()
 
         self.log("val_loss", loss, prog_bar=True)

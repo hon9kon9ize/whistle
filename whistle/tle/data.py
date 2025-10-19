@@ -661,13 +661,21 @@ class TLECollator:
             pad_to_multiple_of=self.pad_to_multiple_of,
         )
 
+        # Create audio attention mask based on lengths
+        max_T = max(lengths) if lengths else 0
+        lengths_tensor = torch.tensor(lengths, dtype=torch.long)
+        audio_attention_mask = torch.zeros(len(lengths), max_T, dtype=torch.bool)
+        for i, length in enumerate(lengths):
+            audio_attention_mask[i, :length] = True
+
         return {
             "audio_arrays": audio_arrays,
             "texts": texts,
             "input_ids": text_batch["input_ids"],
             "attention_mask": text_batch["attention_mask"],
             "lang_ids": torch.tensor(languages, dtype=torch.long),
-            "lengths": torch.tensor(lengths, dtype=torch.long),
+            "lengths": lengths_tensor,
+            "audio_attention_mask": audio_attention_mask,
         }
 
 

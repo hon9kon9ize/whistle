@@ -316,9 +316,10 @@ def vae_loss(
     logvar: torch.Tensor,
     beta: float,
     free_bits_threshold: float = 0.0,
+    mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) ) with optional free-bits
+    MSE recon over (B,T,H) + beta * KL( q(z|y) || N(0,I) ) with optional free-bits and masking
 
     Args:
         E_tilde: predicted encoder states (B, T, H)
@@ -327,11 +328,20 @@ def vae_loss(
         logvar: latent log variance (B, z_dim)
         beta: KL weight coefficient
         free_bits_threshold: minimum KL per dimension to penalize (in nats)
+        mask: optional boolean mask (B, T) for valid positions. If provided, MSE is computed only over valid positions.
 
     Returns:
         Tuple of (total_loss, mse_loss, kl_loss)
     """
-    mse = F.mse_loss(E_tilde, E_teacher)
+    if mask is not None:
+        # Compute masked MSE: only consider valid positions
+        diff = (E_tilde - E_teacher) ** 2  # (B, T, H)
+        masked_diff = diff * mask.unsqueeze(-1)  # Zero out invalid positions
+        mse = masked_diff.sum() / (
+            mask.sum() * E_tilde.size(-1)
+        )  # Average over valid elements
+    else:
+        mse = F.mse_loss(E_tilde, E_teacher)
 
     # Compute KL per dimension
     # KL(q(z) || N(0,I)) = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))

@@ -118,7 +118,7 @@ class WhisperDecoderFinetune(pl.LightningModule):
             # Estimate target length from text length
             target_T = max(50, input_ids.size(1) * 3)  # Rough heuristic
 
-            E_pseudo, _, _, _ = self.tle_model(
+            E_pseudo, _, _ = self.tle_model(
                 input_ids, attention_mask, target_T=target_T, lang_ids=lang_ids
             )
 
@@ -159,7 +159,7 @@ class WhisperDecoderFinetune(pl.LightningModule):
         # Get pseudo encoder states
         with torch.no_grad():
             target_T = max(50, input_ids.size(1) * 3)
-            E_pseudo, _, _, _ = self.tle_model(
+            E_pseudo, _, _ = self.tle_model(
                 input_ids, attention_mask, target_T=target_T, lang_ids=lang_ids
             )
 
