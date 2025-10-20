@@ -316,8 +316,8 @@ class TLEVAE(nn.Module):
 
         # 3) Seed time sequence by interpolating text→H to target_T
         if target_T is None:
-            # Heuristic if not given: ~ 2 frames per token (tune to your data)
-            target_T = max(2, 2 * L)
+            # Default to Whisper's fixed 1500 timesteps for 30s audio
+            target_T = 1500
         seed = self.text_to_H(text_feats)  # (B, L, H)
         x = self._interp_time(seed, target_T)  # (B, T, H)
         x = self.pe(x)  # add positional encoding
