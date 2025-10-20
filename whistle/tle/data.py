@@ -566,15 +566,45 @@ class TLECollator:
             lang_id = self.language_mapping.get(lang_code, 0)  # Default to 0 if unknown
             languages.append(lang_id)
 
-        # Tokenize texts
-        text_batch = self.tokenizer(
-            texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.max_text_length,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-        )
+        # Tokenize texts with proper language prefix tokens
+        input_ids_list = []
+        attention_masks_list = []
+
+        for text, lang_id in zip(texts, languages):
+            # Map lang_id back to language code
+            lang_code = None
+            for code, id_val in self.language_mapping.items():
+                if id_val == lang_id:
+                    lang_code = code
+                    break
+            lang_code = lang_code or "en"  # Default to English
+
+            # Set prefix tokens for language (same as Whisper expects)
+            self.tokenizer.set_prefix_tokens(language=lang_code, task="transcribe")
+
+            # Tokenize with language prefix
+            tokens = self.tokenizer(
+                text,
+                return_tensors="pt",
+                max_length=self.max_text_length,
+                truncation=True,
+                padding=False,  # We'll pad later
+            )
+
+            input_ids_list.append(tokens["input_ids"].squeeze(0))
+            attention_masks_list.append(tokens["attention_mask"].squeeze(0))
+
+        # Now pad all sequences to same length
+        text_batch = {
+            "input_ids": torch.nn.utils.rnn.pad_sequence(
+                input_ids_list,
+                batch_first=True,
+                padding_value=self.tokenizer.pad_token_id,
+            ),
+            "attention_mask": torch.nn.utils.rnn.pad_sequence(
+                attention_masks_list, batch_first=True, padding_value=0
+            ),
+        }
 
         return {
             "audio_arrays": audio_arrays,
