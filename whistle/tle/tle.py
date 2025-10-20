@@ -15,12 +15,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------
 # Small Utilities
 # ---------------------------
-def lengths_to_mask(
-    lengths: torch.Tensor, max_len: Optional[int] = None
-) -> torch.Tensor:
-    max_len = max_len or int(lengths.max().item())
-    rng = torch.arange(max_len, device=lengths.device)[None, :]
-    return rng < lengths[:, None]
 
 
 class ResidualConv1dFiLM(nn.Module):
@@ -114,9 +108,7 @@ class TLEVAEConfig:
         5000  # steps to anneal beta (increased for smoother transition)
     )
     # Free-bits parameters
-    free_bits_threshold: float = (
-        0.01  # KL per dim threshold (in nats) - REDUCED from 1.0 to 0.01 to prevent posterior collapse
-    )
+    free_bits_threshold: float = 1.0  # KL per dim threshold (in nats)
     # Language conditioning parameters
     num_languages: int = 3  # en, zh, yue
     lang_embed_dim: int = 32  # small language embedding dimension
@@ -359,7 +351,7 @@ def vae_loss(
         mu: latent mean (B, z_dim)
         logvar: latent log variance (B, z_dim)
         beta: KL weight coefficient
-        free_bits_threshold: minimum KL per dimension to penalize (in nats)
+        free_bits_threshold: minimum KL per dimension to penalize (in nats). Higher values (1.0-3.0) prevent posterior collapse.
         mask: optional boolean mask (B, T) for valid positions. If provided, MSE is computed only over valid positions.
 
     Returns:

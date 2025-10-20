@@ -50,6 +50,11 @@ Loss:
 \mathcal{L} = \| E_{\text{teacher}} - \tilde{E} \|_2^2 + \beta\, \mathrm{KL}\big(q_\phi(z|y)\,\|\,\mathcal{N}(0,I)\big)
 \]
 
+With **free-bits regularization** to prevent posterior collapse:
+\[
+\mathrm{KL}_{free} = \max(0, \mathrm{KL} - \tau), \quad \tau = 1.0 \, \mathrm{nats/dim}
+\]
+
 ---
 
 ## 🧰 Installation

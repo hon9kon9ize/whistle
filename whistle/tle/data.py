@@ -626,12 +626,10 @@ class TLECollator:
             - input_ids: Padded text token ids (B, L)
             - attention_mask: Attention mask for text (B, L)
             - lang_ids: Language IDs tensor (B,)
-            - lengths: Target sequence lengths tensor (B,) - number of Whisper encoder frames
         """
         audio_arrays = []
         texts = []
         languages = []
-        lengths = []
 
         for item in batch:
             audio_arrays.append(item["audio_array"])
@@ -640,16 +638,6 @@ class TLECollator:
             lang_code = item.get("language", "en")  # Default to English
             lang_id = self.language_mapping.get(lang_code, 0)  # Default to 0 if unknown
             languages.append(lang_id)
-
-            # Compute target length: approximate Whisper encoder frames
-            # Whisper v3 processes at ~50Hz, so length ≈ duration * 50
-            # We use the actual audio length to compute this
-            audio_len = len(item["audio_array"])
-            # Assuming 16kHz sampling rate, compute duration and then frames
-            # Whisper encoder produces ~50 frames per second
-            duration_seconds = audio_len / 16000.0
-            target_length = max(1, int(duration_seconds * 50))  # At least 1 frame
-            lengths.append(target_length)
 
         # Tokenize texts
         text_batch = self.tokenizer(
@@ -661,21 +649,12 @@ class TLECollator:
             pad_to_multiple_of=self.pad_to_multiple_of,
         )
 
-        # Create audio attention mask based on lengths
-        max_T = max(lengths) if lengths else 0
-        lengths_tensor = torch.tensor(lengths, dtype=torch.long)
-        audio_attention_mask = torch.zeros(len(lengths), max_T, dtype=torch.bool)
-        for i, length in enumerate(lengths):
-            audio_attention_mask[i, :length] = True
-
         return {
             "audio_arrays": audio_arrays,
             "texts": texts,
             "input_ids": text_batch["input_ids"],
             "attention_mask": text_batch["attention_mask"],
             "lang_ids": torch.tensor(languages, dtype=torch.long),
-            "lengths": lengths_tensor,
-            "audio_attention_mask": audio_attention_mask,
         }
 
 
