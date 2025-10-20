@@ -49,50 +49,40 @@ def safe_get_audio_info(
         return None
 
 
-def apply_audio_augmentation(
-    audio_array: np.ndarray, augmentation_type: str = "telephony", **kwargs
-) -> np.ndarray:
+def safe_get_audio_info(
+    item: Dict[str, Any], audio_column: str = "audio"
+) -> Optional[Dict[str, Any]]:
     """
-    Apply various audio augmentations to the input array.
+    Safely extract audio information from a dataset item with error handling.
 
     Args:
-        audio_array: Input audio array
-        augmentation_type: Type of augmentation ("telephony", "noise", "pitch_shift", "time_stretch")
-        **kwargs: Additional parameters for specific augmentations
+        item: Dataset item dictionary
+        audio_column: Name of the audio column
 
     Returns:
-        Augmented audio array
+        Audio info dict or None if extraction fails
     """
-    if augmentation_type == "telephony":
-        # 8kHz resampling + μ-law compression
-        target_sr = kwargs.get("target_sr", 8000)
-        audio_array = librosa.resample(
-            audio_array, orig_sr=kwargs.get("orig_sr", 16000), target_sr=target_sr
-        )
-        # Normalize to [-1, 1] for mu-law
-        audio_array = audio_array / (np.max(np.abs(audio_array)) + 1e-8)
-        # Apply μ-law compression
-        audio_array = librosa.mu_compress(audio_array, mu=255)
+    try:
+        audio_info = item.get(audio_column)
+        if audio_info is None:
+            logger.warning(f"Missing audio column '{audio_column}' in item")
+            return None
 
-    elif augmentation_type == "noise":
-        # Add Gaussian noise
-        noise_std = kwargs.get("noise_std", 0.01)
-        noise = np.random.normal(0, noise_std, size=audio_array.shape)
-        audio_array = audio_array + noise
-
-    elif augmentation_type == "pitch_shift":
-        # Pitch shifting
-        n_steps = kwargs.get("n_steps", 2)
-        audio_array = librosa.effects.pitch_shift(
-            audio_array, sr=kwargs.get("sr", 16000), n_steps=n_steps
-        )
-
-    elif augmentation_type == "time_stretch":
-        # Time stretching
-        rate = kwargs.get("rate", 1.1)
-        audio_array = librosa.effects.time_stretch(audio_array, rate=rate)
-
-    return audio_array
+        # Handle different audio formats
+        if isinstance(audio_info, dict):
+            if "array" not in audio_info:
+                logger.warning(f"Missing 'array' key in audio info")
+                return None
+            return audio_info
+        elif isinstance(audio_info, (list, np.ndarray)):
+            # Handle raw audio arrays
+            return {"array": audio_info, "sampling_rate": 16000}  # Assume 16kHz
+        else:
+            logger.warning(f"Unsupported audio format: {type(audio_info)}")
+            return None
+    except Exception as e:
+        logger.error(f"Error extracting audio info: {e}")
+        return None
 
 
 class PreprocessedAudioTextDataset(Dataset):
@@ -106,55 +96,27 @@ class PreprocessedAudioTextDataset(Dataset):
         self,
         hf_dataset: HFDataset | DatasetDict | IterableDataset | IterableDatasetDict,
         split: str = "train",
-        augment: bool = False,
     ):
         """
         Args:
             hf_dataset: Loaded HuggingFace dataset with preprocessed data
             split: Dataset split to use ("train", "test")
-            augment: Whether to apply random audio augmentation (telephony, noise, pitch_shift, time_stretch)
         """
         self.dataset = hf_dataset[split] if split in hf_dataset else hf_dataset
-        self.augment = augment
         self.original_length = len(self.dataset)
         logger.info(f"Loaded {self.original_length} preprocessed samples")
 
     def __len__(self) -> int:
-        if self.augment:
-            return 2 * self.original_length
         return self.original_length
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Get a single data sample."""
-        if self.augment and idx >= self.original_length:
-            # Augmented sample
-            actual_idx = idx - self.original_length
-            augment_sample = True
-        else:
-            # Original sample
-            actual_idx = idx
-            augment_sample = False
-
-        item = self.dataset[actual_idx]
+        item = self.dataset[idx]
 
         # Get audio array from standardized format
         audio_info = item["audio"]
         audio_array = np.array(audio_info["array"], dtype=np.float32)
         source_sr = audio_info["sampling_rate"]
-
-        # Apply random augmentation if requested for this sample
-        if augment_sample:
-            # Randomly choose augmentation type
-            augmentation_types = ["telephony", "noise", "pitch_shift", "time_stretch"]
-            chosen_augmentation = random.choice(augmentation_types)
-
-            # Apply the chosen augmentation
-            audio_array = apply_audio_augmentation(
-                audio_array,
-                augmentation_type=chosen_augmentation,
-                orig_sr=source_sr,
-                sr=source_sr,
-            )
 
         return {
             "audio_array": audio_array,
@@ -181,7 +143,6 @@ class AudioTextDataset(Dataset):
         audio_column: str = "audio",
         audio_array_key: str = "array",
         audio_sampling_rate_key: str = "sampling_rate",
-        augment: bool = False,
     ):
         """
         Args:
@@ -194,7 +155,6 @@ class AudioTextDataset(Dataset):
             audio_column: Name of audio column in dataset
             audio_array_key: Key for audio array within audio column (e.g., "array")
             audio_sampling_rate_key: Key for sampling rate within audio column
-            augment: Whether to apply random audio augmentation (telephony, noise, pitch_shift, time_stretch)
         """
         self.dataset = hf_dataset[split] if split in hf_dataset else hf_dataset
         self.sampling_rate = sampling_rate
@@ -204,7 +164,6 @@ class AudioTextDataset(Dataset):
         self.audio_column = audio_column
         self.audio_array_key = audio_array_key
         self.audio_sampling_rate_key = audio_sampling_rate_key
-        self.augment = augment
 
         # Skip filtering for faster data loading - validation happens in __getitem__
         try:
@@ -220,27 +179,12 @@ class AudioTextDataset(Dataset):
             # For streaming datasets, return a large number
             # The actual length will be determined by data availability
             return 1000000  # Large number for streaming
-        if self.augment:
-            return 2 * self.original_length
         return self.original_length
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Get a single data sample."""
-        # For streaming datasets, disable augmentation since we don't know total length
-        if self.original_length is None:
-            augment_sample = False
-            actual_idx = idx
-        else:
-            # Original augmentation logic for regular datasets
-            if self.augment and idx >= self.original_length:
-                actual_idx = idx - self.original_length
-                augment_sample = True
-            else:
-                actual_idx = idx
-                augment_sample = False
-
         try:
-            item = self.dataset[actual_idx]
+            item = self.dataset[idx]
         except (IndexError, StopIteration):
             # End of streaming dataset or invalid index
             raise IndexError(f"Index {idx} out of range")
@@ -269,20 +213,6 @@ class AudioTextDataset(Dataset):
         if not (self.min_audio_length <= duration <= self.max_audio_length):
             raise ValueError(
                 f"Audio duration {duration:.2f}s out of range [{self.min_audio_length}, {self.max_audio_length}] for sample {idx}"
-            )
-
-        # Apply random augmentation if requested for this sample
-        if augment_sample:
-            # Randomly choose augmentation type
-            augmentation_types = ["telephony", "noise", "pitch_shift", "time_stretch"]
-            chosen_augmentation = random.choice(augmentation_types)
-
-            # Apply the chosen augmentation
-            audio_array = apply_audio_augmentation(
-                audio_array,
-                augmentation_type=chosen_augmentation,
-                orig_sr=self.sampling_rate,
-                sr=self.sampling_rate,
             )
 
         # Truncate if too long (shouldn't happen due to filtering, but safety check)
@@ -413,7 +343,6 @@ class MultilingualAudioTextDataset(Dataset):
         audio_array_key: str = "array",
         audio_sampling_rate_key: str = "sampling_rate",
         language_weights: Optional[Dict[str, float]] = None,
-        augment: bool = False,
     ):
         """
         Args:
@@ -427,7 +356,6 @@ class MultilingualAudioTextDataset(Dataset):
             audio_array_key: Key for audio array within audio column
             audio_sampling_rate_key: Key for sampling rate within audio column
             language_weights: Optional weights for dataset sampling
-            augment: Whether to apply random audio augmentation
         """
         self.datasets = {}
         self.cumulative_sizes = []
@@ -446,7 +374,6 @@ class MultilingualAudioTextDataset(Dataset):
                 audio_column=audio_column,
                 audio_array_key=audio_array_key,
                 audio_sampling_rate_key=audio_sampling_rate_key,
-                augment=augment,
             )
 
             if len(dataset) > 0:
@@ -665,7 +592,6 @@ def create_preprocessed_data_loader(
     split: str = "train",
     batch_size: int = 8,
     max_text_length: int = 256,
-    augment: bool = False,
     num_workers: int = 4,  # Enable multiprocessing by default
 ) -> DataLoader:
     """
@@ -678,7 +604,6 @@ def create_preprocessed_data_loader(
         split: Dataset split ("train", "test")
         batch_size: Training batch size
         max_text_length: Maximum text sequence length
-        augment: Whether to apply random audio augmentation
         num_workers: Number of worker processes for data loading
 
     Returns:
@@ -688,7 +613,6 @@ def create_preprocessed_data_loader(
     preprocessed_dataset = PreprocessedAudioTextDataset(
         hf_dataset=dataset,
         split=split,
-        augment=augment,
     )
 
     # Create collator
@@ -765,7 +689,6 @@ def create_tle_data_loader(
     audio_column: str = "audio",
     audio_array_key: str = "array",
     audio_sampling_rate_key: str = "sampling_rate",
-    augment: bool = False,
 ) -> DataLoader:
     """
     Convenience function to create a DataLoader for multilingual audio-text training.
@@ -788,7 +711,6 @@ def create_tle_data_loader(
         audio_column: Name of audio column in dataset (default: "audio")
         audio_array_key: Key for audio array within audio column (default: "array")
         audio_sampling_rate_key: Key for sampling rate within audio column (default: "sampling_rate")
-        augment: Whether to apply random audio augmentation
 
     Returns:
         Configured DataLoader for multilingual TLE training
@@ -804,7 +726,6 @@ def create_tle_data_loader(
         audio_column=audio_column,
         audio_array_key=audio_array_key,
         audio_sampling_rate_key=audio_sampling_rate_key,
-        augment=augment,
     )
 
     # Create collator

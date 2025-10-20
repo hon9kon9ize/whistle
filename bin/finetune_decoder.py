@@ -44,15 +44,14 @@ def load_tle_model(checkpoint_path: str, device: str = "cuda") -> TLEVAE:
     """Load trained TLE model from checkpoint."""
     print(f"Loading TLE model from {checkpoint_path}...")
 
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Use the same loading function as inference
+    from whistle.utils.checkpoint_utils import load_tle_checkpoint_from_lightning
 
-    # Reconstruct config from checkpoint
-    cfg = TLEVAEConfig(**checkpoint["hyper_parameters"]["cfg"])
+    # Create config (same as training)
+    cfg = TLEVAEConfig(vocab_size=51866, whisper_hidden=1280)
 
-    # Create model and load state
-    model = TLEVAE(cfg)
-    model.load_state_dict(checkpoint["state_dict"])
+    # Load model
+    model = load_tle_checkpoint_from_lightning(checkpoint_path, cfg)
     model = model.to(device)
     model.eval()
 
@@ -330,9 +329,6 @@ def main():
         "--use_wandb", action="store_true", help="Enable Weights & Biases logging"
     )
     parser.add_argument(
-        "--train_split", type=str, default="train", help="Training split name"
-    )
-    parser.add_argument(
         "--val_split", type=str, default="validation", help="Validation split name"
     )
 
@@ -348,15 +344,26 @@ def main():
 
     # Load dataset
     print(f"Loading dataset: {args.dataset}")
-    try:
-        dataset = load_dataset(args.dataset)
-    except Exception as e:
-        print(f"Failed to load dataset: {e}")
-        return
+    if args.dataset.endswith(".json"):
+        # Load local JSON dataset
+        import json
+
+        with open(args.dataset, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Convert to dataset format
+        dataset = {"train": data, "validation": data[:3]}  # Use first 3 for validation
+    else:
+        try:
+            dataset = load_dataset(args.dataset)
+        except Exception as e:
+            print(f"Failed to load dataset: {e}")
+            return
 
     # Create datasets
     train_dataset = TextOnlyDataset(dataset, processor, split=args.train_split)
     val_dataset = TextOnlyDataset(dataset, processor, split=args.val_split)
+
+    print("🎵 Using clean text for decoder fine-tuning")
 
     # Create collator
     collator = TextOnlyCollator(processor)

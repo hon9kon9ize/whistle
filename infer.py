@@ -29,7 +29,7 @@ from transformers import (
     pipeline,
 )
 from whistle.tle.tle import TLEVAE, TLEVAEConfig
-from whistle.utils.checkpoint_utils import load_tle_checkpoint
+from whistle.utils.checkpoint_utils import load_tle_checkpoint_from_lightning
 
 
 class TLEInferencePipeline:
@@ -56,7 +56,9 @@ class TLEInferencePipeline:
         print(f"Loading TLE model from {tle_checkpoint_path}")
         # Create TLE config (same as training)
         self.tle_config = TLEVAEConfig(vocab_size=51866, whisper_hidden=1280)
-        self.tle_model = load_tle_checkpoint(tle_checkpoint_path, self.tle_config)
+        self.tle_model = load_tle_checkpoint_from_lightning(
+            tle_checkpoint_path, self.tle_config
+        )
         self.tle_model.to(self.device)
         self.tle_model.eval()
 
@@ -136,19 +138,7 @@ class TLEInferencePipeline:
 
         # Estimate target length if not provided
         if target_length is None:
-            # Use language-specific T/L ratios from training data
-            # yue: avg T=291.3, avg L=35.6, T/L=11.925
-            # zh-CN: avg T=254.0, avg L=20.7, T/L=12.29
-            # en: avg T=306.6, avg L=13.9, T/L=22.09
-            language_ratios = {
-                "en": 22.09,  # English: ~22 frames per token
-                "zh": 12.29,  # Mandarin: ~12.3 frames per token
-                "yue": 11.925,  # Cantonese: ~12 frames per token
-            }
-
-            ratio = language_ratios.get(language, 12.0)  # Default to 12 if unknown
-            num_tokens = (attention_mask.sum() - 1).item()  # Subtract BOS/EOS
-            target_length = max(50, int(num_tokens * ratio))
+            target_length = 1500  # Fixed T for consistent latent length
 
         print(f"Encoding '{text}' ({language}) → latents with T={target_length}")
 
@@ -188,6 +178,16 @@ class TLEInferencePipeline:
 
         # Latents should already be in Whisper's hidden dimension (1280) from TLE
         # No projection needed - TLE is trained specifically for whisper-large-v3
+
+        # Scale latents to match expected magnitude (experimental)
+        # TLE latents are ~935 magnitude, random latents that work are ~1386
+        target_magnitude = 1386.0
+        current_magnitude = latents.norm().item()
+        scale_factor = target_magnitude / current_magnitude
+        latents = latents * scale_factor
+        print(
+            f"Scaled latents from magnitude {current_magnitude:.1f} to {latents.norm().item():.1f}"
+        )
 
         with torch.no_grad():
             # Create proper EncoderOutput object

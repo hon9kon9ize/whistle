@@ -342,7 +342,6 @@ class TLEDataModule(pl.LightningDataModule):
         batch_size: int = 8,
         train_split: str = "train",
         test_split: str = "valid",
-        augment: bool = False,
         val_samples: Optional[int] = None,
     ):
         super().__init__()
@@ -352,7 +351,6 @@ class TLEDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.train_split = train_split
         self.test_split = test_split
-        self.augment = augment
         self.val_samples = val_samples
 
     def train_dataloader(self):
@@ -363,7 +361,6 @@ class TLEDataModule(pl.LightningDataModule):
             split=self.train_split,
             batch_size=self.batch_size,
             max_text_length=256,
-            augment=self.augment,
             num_workers=8,
         )
 
@@ -397,7 +394,6 @@ class TLEDataModule(pl.LightningDataModule):
             split=self.test_split,
             batch_size=self.batch_size,
             max_text_length=256,
-            augment=self.augment,
             num_workers=8,
         )
 
@@ -413,7 +409,6 @@ def train_with_dataset(
     test_split: str = "test",
     val_samples: Optional[int] = None,
     use_wandb: bool = False,
-    augment: bool = False,
     precision: str = "auto",
     learning_rate: float = 1e-3,
 ):
@@ -430,7 +425,6 @@ def train_with_dataset(
         batch_size=batch_size,
         train_split=train_split,
         test_split=test_split,
-        augment=augment,
         val_samples=val_samples,
     )
 
@@ -571,7 +565,6 @@ def train_with_preprocessed_dataset(
     subset: Optional[str] = None,
     val_samples: Optional[int] = None,
     use_wandb: bool = False,
-    augment: bool = False,
     precision: str = "auto",
     learning_rate: float = 1e-3,
 ):
@@ -590,7 +583,6 @@ def train_with_preprocessed_dataset(
         subset: Dataset subset/configuration name (only used for HuggingFace datasets)
         val_samples: Limit validation to N random samples (e.g., 1000 for faster validation)
         use_wandb: Enable Weights & Biases logging
-        augment: Apply random audio augmentation
         precision: Mixed precision mode (auto, 32, 16, bf16)
         learning_rate: Learning rate for training
     """
@@ -634,7 +626,6 @@ def train_with_preprocessed_dataset(
         test_split=test_split,
         val_samples=val_samples,
         use_wandb=use_wandb,
-        augment=augment,
         precision=precision,
         learning_rate=learning_rate,
     )
@@ -701,11 +692,6 @@ if __name__ == "__main__":
         help="Enable Weights & Biases logging",
     )
     parser.add_argument(
-        "--augment",
-        action="store_true",
-        help="Apply random audio augmentation (telephony, noise, pitch_shift, time_stretch) to training and validation datasets",
-    )
-    parser.add_argument(
         "--precision",
         type=str,
         default="auto",
@@ -742,7 +728,6 @@ if __name__ == "__main__":
         subset=args.subset,
         val_samples=args.val_samples,
         use_wandb=args.use_wandb,
-        augment=args.augment,
         precision=args.precision,
         learning_rate=args.learning_rate,
     )
