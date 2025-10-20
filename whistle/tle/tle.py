@@ -108,7 +108,9 @@ class TLEVAEConfig:
         5000  # steps to anneal beta (increased for smoother transition)
     )
     # Free-bits parameters
-    free_bits_threshold: float = 1.0  # KL per dim threshold (in nats)
+    free_bits_threshold: float = (
+        0.15  # KL per dim threshold (in nats) - BALANCED: prevents collapse but maintains KL pressure
+    )
     # Language conditioning parameters
     num_languages: int = 3  # en, zh, yue
     lang_embed_dim: int = 32  # small language embedding dimension
@@ -351,7 +353,7 @@ def vae_loss(
         mu: latent mean (B, z_dim)
         logvar: latent log variance (B, z_dim)
         beta: KL weight coefficient
-        free_bits_threshold: minimum KL per dimension to penalize (in nats). Higher values (1.0-3.0) prevent posterior collapse.
+        free_bits_threshold: minimum KL per dimension to penalize (in nats). Balanced value (0.1-0.2) prevents posterior collapse while maintaining training stability.
         mask: optional boolean mask (B, T) for valid positions. If provided, MSE is computed only over valid positions.
 
     Returns:

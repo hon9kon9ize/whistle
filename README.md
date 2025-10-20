@@ -52,7 +52,7 @@ Loss:
 
 With **free-bits regularization** to prevent posterior collapse:
 \[
-\mathrm{KL}_{free} = \max(0, \mathrm{KL} - \tau), \quad \tau = 1.0 \, \mathrm{nats/dim}
+\mathrm{KL}_{free} = \max(0, \mathrm{KL} - \tau), \quad \tau = 0.15 \, \mathrm{nats/dim}
 \]
 
 ---
