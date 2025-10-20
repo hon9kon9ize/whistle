@@ -210,8 +210,8 @@ class TLEVAE(nn.Module):
         )  # final projection
 
         # Learnable affine calibrator to match Whisper encoder output scale precisely
-        self.out_scale = nn.Parameter(torch.ones(cfg.whisper_hidden))  # γ (scale)
-        self.out_shift = nn.Parameter(torch.zeros(cfg.whisper_hidden))  # β (shift)
+        self.out_scale = nn.Parameter(torch.tensor(1.0))  # γ (scale)
+        self.out_shift = nn.Parameter(torch.tensor(0.0))  # β (shift)
 
         # Initialize weights properly
         self.apply(self._init_weights)
